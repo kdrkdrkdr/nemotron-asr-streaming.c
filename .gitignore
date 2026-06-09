@@ -1,0 +1,4 @@
+*.o
+nemotron_asr
+*.bin
+__pycache__/
