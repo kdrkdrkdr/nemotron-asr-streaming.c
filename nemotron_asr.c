@@ -64,29 +64,70 @@ int nemo_set_language(nemo_ctx_t *ctx, const char *lang) {
     return -1;
 }
 
+typedef struct {
+    nemo_ctx_t *ctx;
+    nemo_rnnt_stream_t *rnnt;
+    nemo_encoder_stream_t *enc;
+} transcribe_stream_cb_t;
+
+static int transcribe_encoder_chunk(void *user, const float *enc, int enc_frames) {
+    transcribe_stream_cb_t *s = (transcribe_stream_cb_t *)user;
+    double t0 = nemo_time_ms();
+    int rc = nemo_rnnt_stream_accept(s->ctx, s->rnnt, enc, enc_frames);
+    s->ctx->perf_decoder_ms += nemo_time_ms() - t0;
+    if (rc == 0) s->ctx->perf_frames += enc_frames;
+    return rc;
+}
+
+static int transcribe_mel_chunk(void *user, const float *mel, int mel_frames, int final) {
+    transcribe_stream_cb_t *s = (transcribe_stream_cb_t *)user;
+    double dec_before = s->ctx->perf_decoder_ms;
+    double t0 = nemo_time_ms();
+    int rc = nemo_encoder_stream_accept(s->ctx, s->enc, mel, mel_frames, final,
+                                        transcribe_encoder_chunk, s);
+    double elapsed = nemo_time_ms() - t0;
+    s->ctx->perf_encoder_ms += elapsed - (s->ctx->perf_decoder_ms - dec_before);
+    return rc;
+}
+
 char *nemo_transcribe_audio(nemo_ctx_t *ctx, const float *samples, int n_samples) {
     if (!ctx || !samples || n_samples <= 0) return NULL;
     ctx->perf_audio_ms = 1000.0 * (double)n_samples / (double)NEMO_SAMPLE_RATE;
     ctx->perf_tokens = 0;
+    ctx->perf_frames = 0;
+    ctx->perf_mel_ms = 0.0;
+    ctx->perf_encoder_ms = 0.0;
+    ctx->perf_decoder_ms = 0.0;
 
-    double t0 = nemo_time_ms();
-    int mel_frames = 0;
-    float *mel = nemo_mel_spectrogram(ctx, samples, n_samples, &mel_frames);
-    ctx->perf_mel_ms = nemo_time_ms() - t0;
-    if (!mel) return NULL;
-
-    t0 = nemo_time_ms();
-    int enc_frames = 0;
-    float *enc = nemo_encoder_forward(ctx, mel, mel_frames, &enc_frames);
-    ctx->perf_encoder_ms = nemo_time_ms() - t0;
-    free(mel);
-    if (!enc) return NULL;
-    ctx->perf_frames = enc_frames;
-
-    t0 = nemo_time_ms();
-    char *text = nemo_rnnt_greedy_decode(ctx, enc, enc_frames);
-    ctx->perf_decoder_ms = nemo_time_ms() - t0;
-    free(enc);
+    nemo_rnnt_stream_t *rnnt = nemo_rnnt_stream_create(ctx);
+    nemo_encoder_stream_t *enc = nemo_encoder_stream_create(ctx);
+    nemo_mel_stream_t *mel_stream = nemo_mel_stream_create(ctx);
+    if (!rnnt || !enc || !mel_stream) {
+        nemo_rnnt_stream_free(rnnt);
+        nemo_encoder_stream_free(enc);
+        nemo_mel_stream_free(mel_stream);
+        return NULL;
+    }
+    transcribe_stream_cb_t cb = {ctx, rnnt, enc};
+    int sample_step = NEMO_HOP_LENGTH * NEMO_SUBSAMPLING_FACTOR * (ctx->att_right + 1);
+    if (sample_step < NEMO_HOP_LENGTH) sample_step = NEMO_HOP_LENGTH;
+    int rc = 0;
+    for (int off = 0; off < n_samples; off += sample_step) {
+        int n = n_samples - off;
+        if (n > sample_step) n = sample_step;
+        int final = (off + n == n_samples);
+        double enc_before = ctx->perf_encoder_ms;
+        double dec_before = ctx->perf_decoder_ms;
+        double t0 = nemo_time_ms();
+        rc = nemo_mel_stream_accept(mel_stream, samples + off, n, final, transcribe_mel_chunk, &cb);
+        double elapsed = nemo_time_ms() - t0;
+        ctx->perf_mel_ms += elapsed - (ctx->perf_encoder_ms - enc_before) - (ctx->perf_decoder_ms - dec_before);
+        if (rc != 0) break;
+    }
+    nemo_mel_stream_free(mel_stream);
+    nemo_encoder_stream_free(enc);
+    if (rc != 0) { nemo_rnnt_stream_free(rnnt); return NULL; }
+    char *text = nemo_rnnt_stream_finish(rnnt);
     return text;
 }
 

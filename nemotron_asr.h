@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "nemotron_asr_kernels.h"
+
 #define NEMO_SAMPLE_RATE       16000
 #define NEMO_MEL_BINS          128
 #define NEMO_N_FFT             512
@@ -20,6 +22,7 @@
 #define NEMO_ENC_HEADS         8
 #define NEMO_HEAD_DIM          128
 #define NEMO_CONV_CHANNELS     256
+#define NEMO_SUBSAMPLING_FACTOR 8
 #define NEMO_SUB_FREQ          17
 #define NEMO_PREENC_IN         (NEMO_CONV_CHANNELS * NEMO_SUB_FREQ)
 
@@ -114,8 +117,19 @@ typedef struct {
     int perf_tokens;
 } nemo_ctx_t;
 
+typedef struct nemo_rnnt_stream_t nemo_rnnt_stream_t;
+typedef struct nemo_encoder_stream_t nemo_encoder_stream_t;
+typedef struct nemo_mel_stream_t nemo_mel_stream_t;
+
+typedef int (*nemo_encoder_chunk_cb)(void *user, const float *enc, int enc_frames);
+typedef int (*nemo_mel_chunk_cb)(void *user, const float *mel, int mel_frames, int final);
+
 float *nemo_load_wav(const char *path, int *out_n_samples);
 float *nemo_mel_spectrogram(const nemo_ctx_t *ctx, const float *samples, int n_samples, int *out_frames);
+nemo_mel_stream_t *nemo_mel_stream_create(const nemo_ctx_t *ctx);
+int nemo_mel_stream_accept(nemo_mel_stream_t *stream, const float *samples, int n_samples,
+                           int final, nemo_mel_chunk_cb cb, void *user);
+void nemo_mel_stream_free(nemo_mel_stream_t *stream);
 
 int nemo_model_load(nemo_model_t *model, const char *path);
 void nemo_model_free(nemo_model_t *model);
@@ -128,19 +142,18 @@ char *nemo_transcribe(nemo_ctx_t *ctx, const char *wav_path);
 char *nemo_transcribe_audio(nemo_ctx_t *ctx, const float *samples, int n_samples);
 
 float *nemo_encoder_forward(nemo_ctx_t *ctx, const float *mel, int mel_frames, int *out_frames);
+int nemo_encoder_forward_chunks(nemo_ctx_t *ctx, const float *mel, int mel_frames,
+                                nemo_encoder_chunk_cb cb, void *user);
+nemo_encoder_stream_t *nemo_encoder_stream_create(nemo_ctx_t *ctx);
+int nemo_encoder_stream_accept(nemo_ctx_t *ctx, nemo_encoder_stream_t *stream,
+                               const float *mel, int mel_frames, int final,
+                               nemo_encoder_chunk_cb cb, void *user);
+void nemo_encoder_stream_free(nemo_encoder_stream_t *stream);
 char *nemo_rnnt_greedy_decode(nemo_ctx_t *ctx, const float *enc, int enc_frames);
-
-void nemo_linear(float *y, const float *x, const float *w, const float *b,
-                 int rows, int in_dim, int out_dim);
-void nemo_linear_nobias(float *y, const float *x, const float *w,
-                        int rows, int in_dim, int out_dim);
-void nemo_layer_norm(float *y, const float *x, const float *w, const float *b,
-                     int rows, int dim, float eps);
-void nemo_softmax(float *x, int n);
-void nemo_swish(float *x, int n);
-void nemo_relu(float *x, int n);
-float nemo_sigmoid(float x);
-float *nemo_alloc(size_t count, size_t elem);
-double nemo_time_ms(void);
+nemo_rnnt_stream_t *nemo_rnnt_stream_create(nemo_ctx_t *ctx);
+int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *stream,
+                            const float *enc, int enc_frames);
+char *nemo_rnnt_stream_finish(nemo_rnnt_stream_t *stream);
+void nemo_rnnt_stream_free(nemo_rnnt_stream_t *stream);
 
 #endif

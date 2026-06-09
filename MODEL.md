@@ -35,6 +35,55 @@ Streaming chunk choices are controlled by the right context:
 - `[56,6]`: 560 ms
 - `[56,13]`: 1120 ms
 
+In the original model this is a cache-aware streaming setup:
+
+- chunk size is `att_right + 1` encoder frames, where one encoder frame is 80 ms
+  after the stride-8 subsampling stack
+- chunks are processed without overlap
+- the causal stride subsampling stack can emit new encoder frames incrementally
+- each encoder layer keeps self-attention cache and convolution cache
+- the RNN-T prediction network keeps its recurrent state across chunks
+
+## Kernel Priority Analysis
+
+The kernel plan is based on the converted model tensor shapes, not copied from
+Qwen. For the 2 second smoke sample the runtime emits 26 encoder frames after
+the stride-8 subsampling stack. MAC counts below use that `T=26` frame count.
+
+Per encoder layer:
+
+- FFN1 linear1 `1024 -> 4096`: 109.1M MAC
+- FFN1 linear2 `4096 -> 1024`: 109.1M MAC
+- self-attention Q/K/V/out projections: 109.1M MAC
+- FFN2 linear1 `1024 -> 4096`: 109.1M MAC
+- FFN2 linear2 `4096 -> 1024`: 109.1M MAC
+- convolution pointwise1 `1024 -> 2048`: 54.5M MAC
+- relative-position projection `1024 -> 1024` over `2T-1`: 53.5M MAC
+- convolution pointwise2 `1024 -> 1024`: 27.3M MAC
+- attention score dot and value accumulation: about 1.2M MAC total
+
+Across 24 layers this is about 16.37B MAC for the encoder stack. The dominant
+hot path is therefore dense fp32 matvec/linear, including FFN, attention
+projections, conformer pointwise conv, pre-encode projection, and joint argmax.
+
+Secondary targets:
+
+- RNNT joint argmax: about 0.335B MAC for the smoke sample
+- pre-encode pointwise conv and projection: about 0.253B MAC
+- prediction LSTM: about 0.098B MAC for initial state plus 14 emitted tokens
+
+Current SIMD backends should therefore prioritize:
+
+- `nemo_matvec_f32` and the dot helper it uses
+- `nemo_argmax_matvec_f32` for the RNNT joint classifier
+- `nemo_attention_score_f32`, because it is a tiny but deeply nested loop
+- `nemo_vec_axpy_inplace` for residual and attention value accumulation
+- `nemo_preconv_emit_f32` for streaming causal subsampling conv stages
+- `nemo_fft512_power_f32` plus `nemo_dot_f32` for the mel front-end
+
+Qwen-only kernels that are not used by the Nemotron graph should not be carried
+over just for symmetry.
+
 References used while matching the graph:
 
 - NVIDIA NeMo `ConformerEncoder` source: https://docs.nvidia.com/nemo/speech/nightly/_modules/nemo/collections/asr/modules/conformer_encoder.html

@@ -11,6 +11,14 @@ typedef struct {
     size_t cap;
 } strbuf_t;
 
+struct nemo_rnnt_stream_t {
+    float *h;
+    float *c;
+    float pred_out[NEMO_PRED_HIDDEN];
+    float pred_proj[NEMO_JOINT_HIDDEN];
+    strbuf_t text;
+};
+
 static int sb_reserve(strbuf_t *sb, size_t add) {
     if (sb->len + add + 1 <= sb->cap) return 0;
     size_t nc = sb->cap ? sb->cap * 2 : 256;
@@ -62,14 +70,10 @@ static void lstm_layer_step(const float *input, const float *w_ih, const float *
                             const float *b_ih, const float *b_hh,
                             float *h, float *c) {
     float gates[4 * NEMO_PRED_HIDDEN];
-    for (int g = 0; g < 4 * NEMO_PRED_HIDDEN; g++) {
-        const float *wi = w_ih + (size_t)g * NEMO_PRED_HIDDEN;
-        const float *wh = w_hh + (size_t)g * NEMO_PRED_HIDDEN;
-        float sum = b_ih[g] + b_hh[g];
-        for (int i = 0; i < NEMO_PRED_HIDDEN; i++) sum += input[i] * wi[i];
-        for (int i = 0; i < NEMO_PRED_HIDDEN; i++) sum += h[i] * wh[i];
-        gates[g] = sum;
-    }
+    float recurrent[4 * NEMO_PRED_HIDDEN];
+    nemo_matvec_f32(gates, input, w_ih, b_ih, NEMO_PRED_HIDDEN, 4 * NEMO_PRED_HIDDEN);
+    nemo_matvec_f32(recurrent, h, w_hh, b_hh, NEMO_PRED_HIDDEN, 4 * NEMO_PRED_HIDDEN);
+    nemo_vec_axpy_inplace(gates, recurrent, 1.0f, 4 * NEMO_PRED_HIDDEN);
     for (int i = 0; i < NEMO_PRED_HIDDEN; i++) {
         float in_gate = nemo_sigmoid(gates[i]);
         float forget_gate = nemo_sigmoid(gates[NEMO_PRED_HIDDEN + i]);
@@ -106,72 +110,79 @@ static int joint_argmax(const nemo_ctx_t *ctx, const float *enc_proj, const floa
         float v = enc_proj[i] + pred_proj[i];
         hidden[i] = v > 0.0f ? v : 0.0f;
     }
-    int best = 0;
-    float best_score = -3.4028234663852886e38f;
-    for (int o = 0; o < NEMO_VOCAB_WITH_BLANK; o++) {
-        const float *w = j->out_w + (size_t)o * NEMO_JOINT_HIDDEN;
-        float sum = j->out_b[o];
-        for (int i = 0; i < NEMO_JOINT_HIDDEN; i++) sum += hidden[i] * w[i];
-        if (sum > best_score) {
-            best_score = sum;
-            best = o;
-        }
-    }
-    return best;
+    return nemo_argmax_matvec_f32(hidden, j->out_w, j->out_b,
+                                  NEMO_JOINT_HIDDEN, NEMO_VOCAB_WITH_BLANK, NULL);
 }
 
-char *nemo_rnnt_greedy_decode(nemo_ctx_t *ctx, const float *enc, int enc_frames) {
+void nemo_rnnt_stream_free(nemo_rnnt_stream_t *s) {
+    if (!s) return;
+    free(s->h);
+    free(s->c);
+    free(s->text.data);
+    free(s);
+}
+
+nemo_rnnt_stream_t *nemo_rnnt_stream_create(nemo_ctx_t *ctx) {
+    const nemo_joint_t *j = &ctx->model.joint;
+    nemo_rnnt_stream_t *s = (nemo_rnnt_stream_t *)calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->h = nemo_alloc((size_t)NEMO_PRED_LAYERS * NEMO_PRED_HIDDEN, sizeof(float));
+    s->c = nemo_alloc((size_t)NEMO_PRED_LAYERS * NEMO_PRED_HIDDEN, sizeof(float));
+    if (!s->h || !s->c) {
+        nemo_rnnt_stream_free(s);
+        return NULL;
+    }
+    if (pred_step(ctx, -1, s->h, s->c, s->pred_out) != 0) {
+        nemo_rnnt_stream_free(s);
+        return NULL;
+    }
+    nemo_linear(s->pred_proj, s->pred_out, j->pred_w, j->pred_b,
+                1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
+    if (sb_reserve(&s->text, 256) != 0) {
+        nemo_rnnt_stream_free(s);
+        return NULL;
+    }
+    s->text.data[0] = 0;
+    return s;
+}
+
+int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *s,
+                            const float *enc, int enc_frames) {
     const nemo_joint_t *j = &ctx->model.joint;
     float *enc_proj = nemo_alloc((size_t)enc_frames * NEMO_JOINT_HIDDEN, sizeof(float));
-    if (!enc_proj) return NULL;
+    if (!enc_proj) return -1;
     nemo_linear(enc_proj, enc, j->enc_w, j->enc_b, enc_frames, NEMO_D_MODEL, NEMO_JOINT_HIDDEN);
-
-    float *h = nemo_alloc((size_t)NEMO_PRED_LAYERS * NEMO_PRED_HIDDEN, sizeof(float));
-    float *c = nemo_alloc((size_t)NEMO_PRED_LAYERS * NEMO_PRED_HIDDEN, sizeof(float));
-    float pred_out[NEMO_PRED_HIDDEN];
-    float pred_proj[NEMO_JOINT_HIDDEN];
-    if (!h || !c) {
-        free(enc_proj); free(h); free(c);
-        return NULL;
-    }
-
-    if (pred_step(ctx, -1, h, c, pred_out) != 0) {
-        free(enc_proj); free(h); free(c);
-        return NULL;
-    }
-    nemo_linear(pred_proj, pred_out, j->pred_w, j->pred_b, 1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
-
-    strbuf_t sb = {0};
-    if (sb_reserve(&sb, 256) != 0) {
-        free(enc_proj); free(h); free(c);
-        return NULL;
-    }
-    sb.data[0] = 0;
-
     for (int t = 0; t < enc_frames; t++) {
         int emitted = 0;
         while (emitted < ctx->max_symbols_per_step) {
-            int tok = joint_argmax(ctx, enc_proj + (size_t)t * NEMO_JOINT_HIDDEN, pred_proj);
+            int tok = joint_argmax(ctx, enc_proj + (size_t)t * NEMO_JOINT_HIDDEN, s->pred_proj);
             if (tok == NEMO_BLANK_ID) break;
-            if (append_piece(ctx, &sb, tok) != 0) {
-                free(sb.data); free(enc_proj); free(h); free(c);
-                return NULL;
-            }
+            if (append_piece(ctx, &s->text, tok) != 0) { free(enc_proj); return -1; }
             ctx->perf_tokens++;
-            if (pred_step(ctx, tok, h, c, pred_out) != 0) {
-                free(sb.data); free(enc_proj); free(h); free(c);
-                return NULL;
-            }
-            nemo_linear(pred_proj, pred_out, j->pred_w, j->pred_b, 1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
+            if (pred_step(ctx, tok, s->h, s->c, s->pred_out) != 0) { free(enc_proj); return -1; }
+            nemo_linear(s->pred_proj, s->pred_out, j->pred_w, j->pred_b,
+                        1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
             emitted++;
         }
     }
-
     free(enc_proj);
-    free(h);
-    free(c);
-    if (!sb.data) {
-        sb.data = (char *)calloc(1, 1);
+    return 0;
+}
+
+char *nemo_rnnt_stream_finish(nemo_rnnt_stream_t *s) {
+    char *text = s->text.data;
+    s->text.data = NULL;
+    nemo_rnnt_stream_free(s);
+    if (!text) text = (char *)calloc(1, 1);
+    return text;
+}
+
+char *nemo_rnnt_greedy_decode(nemo_ctx_t *ctx, const float *enc, int enc_frames) {
+    nemo_rnnt_stream_t *stream = nemo_rnnt_stream_create(ctx);
+    if (!stream) return NULL;
+    if (nemo_rnnt_stream_accept(ctx, stream, enc, enc_frames) != 0) {
+        nemo_rnnt_stream_free(stream);
+        return NULL;
     }
-    return sb.data;
+    return nemo_rnnt_stream_finish(stream);
 }
