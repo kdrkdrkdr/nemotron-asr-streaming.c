@@ -1,49 +1,335 @@
-# nemotron_asr
+# Nemotron 3.5 ASR Streaming Pure C
 
-Dependency-free pure C inference runtime for `nvidia/nemotron-3.5-asr-streaming-0.6b`.
+This is a dependency-free C inference runtime for
+`nvidia/nemotron-3.5-asr-streaming-0.6b`.
 
-The runtime does not load `.nemo` directly. Convert once to a simple mmap-friendly
-binary, then run the C executable:
+The runtime is designed around the original cache-aware streaming model:
+audio is accepted in chunks, mel frames are emitted incrementally, the
+FastConformer encoder keeps attention and convolution caches, and the RNN-T
+decoder keeps prediction-network state across chunks.
+
+Inference does not require Python, PyTorch, NeMo, YAML, SentencePiece, BLAS, or
+any external runtime library. The `.nemo` model is converted once into a simple
+mmap-friendly `.bin` file.
+
+## Supported Modes
+
+- **WAV mode**: transcribe a WAV file through the same streaming pipeline used
+  by live input.
+- **Live microphone mode**: macOS AudioQueue input, selectable input device,
+  chunk trace output, and audio level metering.
+- **Model conversion**: extract `model_config.yaml`, `model_weights.ckpt`, and
+  the RNN-T vocabulary from the original `.nemo` archive into the C runtime
+  binary format.
+
+## Quick Start
 
 ```bash
-python3 tools/convert_nemo.py ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
+# Convert the original NeMo archive once.
+python3 tools/convert_nemo.py \
+  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
   -o nemotron-3.5-asr-streaming-0.6b.bin
 
+# Build the normal WAV CLI.
 make
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i ../qwen-asr/samples/jfk.wav -l en-US --strip-tags
+
+# Transcribe a WAV file.
+./nemotron_asr \
+  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  -i ../qwen-asr/samples/jfk.wav \
+  -l en-US \
+  --strip-tags
 ```
 
-Conversion requires Python with `torch` and `yaml`; inference does not.
+Conversion requires Python with `torch` and `yaml`. Inference does not.
 
-Model facts implemented here:
+## Features
 
-- Audio: 16 kHz mono, 128 log-mel bins, `n_fft=512`, `win=400`, `hop=160`.
-- Encoder: 24-layer cache-aware FastConformer, `d_model=1024`, `8 x 128` heads.
-- Subsampling: causal `dw_striding`, factor 8, output feature flatten size `256 * 17`.
-- Prompt: language one-hot `128` concatenated to encoder output, projected by `prompt_kernel`.
-- Decoder: RNN-T greedy decoding with 2-layer LSTM prediction network and joint network.
-
-Streaming status:
-
-- Audio samples are accepted in chunks by the WAV convenience path.
-- Mel frames are emitted incrementally once their centered analysis window is
-  available, with a final flush for right-padding.
-- The subsampling conv stem runs as streaming stages and emits new pre-encoder
-  frames without recomputing prior stage outputs.
-- The encoder runs in non-overlapping chunks of `att_right + 1` 80 ms frames,
-  matching the cache-aware `att_context_size` choices from the original model.
-- Each Conformer layer keeps attention K/V cache and causal convolution cache.
-- The RNN-T decoder keeps prediction LSTM state and accepts encoder chunks
+- **Pure C inference**: C11 runtime with libc/libm only.
+- **Memory-mapped model file**: converted weights are mmap'd from a compact
+  tensor stream.
+- **Original streaming shape**: chunk size is controlled by Nemotron's
+  cache-aware `att_context_size` right context.
+- **Incremental front end**: audio samples and mel frames are accepted
   incrementally.
-- The current sample front-end uses a simple grow buffer for frame construction;
-  replacing it with a bounded ring buffer is a memory optimization, not a graph
-  semantics change.
+- **Streaming encoder**: causal subsampling, per-layer attention K/V cache, and
+  causal convolution cache.
+- **Streaming RNN-T decoder**: prediction LSTM state is preserved across
+  encoder chunks.
+- **Language prompt control**: supports prompt IDs such as `auto`, `en-US`, and
+  `ko-KR`.
+- **Native kernels**: generic C fallback plus NEON and AVX dispatch for hot
+  math paths.
+- **Live testing**: macOS microphone CLI with input device selection and a
+  real-time input meter.
 
-Kernels:
+## Build
 
-- `make` builds the native dispatch path. On ARM this uses NEON; on AVX2+FMA
-  x86 builds this uses AVX; otherwise it falls back to generic C.
-- `make generic` forces the scalar C fallback with `NEMO_FORCE_GENERIC`.
-- Kernel entry points cover the Nemotron hot path from `MODEL.md`: dense fp32
-  matvec/argmax, relative-attention score dot, residual axpy, streaming preconv
-  emit, and 512-point FFT power for mel features.
+```bash
+make          # native optimized build
+make generic  # force scalar C fallback with NEMO_FORCE_GENERIC
+make debug    # AddressSanitizer debug build
+make mic      # build macOS live microphone tool
+make clean
+```
+
+`make` uses `-march=native`, `-ffast-math`, and LTO by default. On ARM builds it
+dispatches to NEON kernels. On AVX2+FMA x86 builds it dispatches to AVX kernels.
+Otherwise it uses the generic C backend.
+
+## Convert Model
+
+The C runtime does not load `.nemo` directly. Convert once:
+
+```bash
+python3 tools/convert_nemo.py \
+  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
+  -o nemotron-3.5-asr-streaming-0.6b.bin
+```
+
+The converter reads:
+
+- `model_config.yaml`
+- `model_weights.ckpt`
+- `cfg["joint"]["vocabulary"]`
+
+It writes a little-endian `.bin` file containing 64-byte-aligned float32 tensor
+payloads followed by vocabulary strings.
+
+## WAV Usage
+
+```bash
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav
+```
+
+Useful options:
+
+```bash
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l ko-KR
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l en-US --strip-tags
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav --att-right 6
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin --model-info
+```
+
+The WAV path loads the file, resamples to 16 kHz mono if needed, and then feeds
+the audio through the same chunked streaming graph used by live input.
+
+## Live Microphone
+
+Live microphone input is currently implemented for macOS through AudioQueue.
+
+```bash
+make mic
+
+./nemotron_asr_mic \
+  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  -l ko-KR \
+  --strip-tags \
+  --att-right 3
+```
+
+List input devices:
+
+```bash
+./nemotron_asr_mic --list-devices
+```
+
+Select a device by index, AudioDeviceID, UID, or exact name:
+
+```bash
+./nemotron_asr_mic \
+  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  --device 1 \
+  -l ko-KR \
+  --strip-tags \
+  --att-right 3 \
+  --meter
+```
+
+On macOS, virtual devices such as BlackHole or VB-Cable may be the default
+input. If microphone audio seems silent, run `--list-devices` and pass the
+actual microphone with `--device`.
+
+`--meter` prints captured audio diagnostics once per second:
+
+```text
+[mic] captured=3.00s (+1.00s) queued=0.12s peak=0.083
+```
+
+- `captured` not increasing usually means permission or capture callback
+  trouble.
+- `captured` increasing with `peak=0.000` usually means the selected input is
+  silent.
+- `peak` moving means audio is reaching the runtime.
+
+Use `Ctrl-C` to stop and flush the final chunk.
+
+## Streaming Chunk Settings
+
+`--att-right` selects the original cache-aware chunk family. One encoder frame
+is 80 ms after factor-8 subsampling.
+
+| `--att-right` | encoder frames per chunk | chunk duration |
+|---------------|--------------------------|----------------|
+| `0`           | `1`                      | 80 ms          |
+| `1`           | `2`                      | 160 ms         |
+| `3`           | `4`                      | 320 ms         |
+| `6`           | `7`                      | 560 ms         |
+| `13`          | `14`                     | 1120 ms        |
+
+Default:
+
+```bash
+--att-right 3
+```
+
+The microphone tool also accepts `--push-frames N`. This controls how often
+captured samples are pushed into the streaming graph, in 80 ms encoder-frame
+units. If omitted, it defaults to `att_right + 1`.
+
+```bash
+# Lower input push latency while keeping the model chunk family.
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin \
+  --device 1 --att-right 3 --push-frames 1 --meter
+```
+
+The model still emits encoder chunks according to `--att-right`; `--push-frames`
+only controls how frequently microphone samples are handed to the front end.
+
+## How Streaming Works
+
+This runtime follows Nemotron's cache-aware FastConformer-RNN-T design instead
+of using text rollback.
+
+Pipeline:
+
+```text
+audio samples
+-> streaming log-mel frames
+-> causal subsampling conv stages
+-> FastConformer chunks with attention K/V cache and conv cache
+-> RNN-T greedy decoder with persistent prediction LSTM state
+-> text
+```
+
+Important details:
+
+- Mel frames are emitted as soon as their centered analysis window is available.
+- The subsampling conv stem emits only new pre-encoder frames.
+- Encoder chunks are non-overlapping and have `att_right + 1` frames.
+- Encoder attention reuses cached left context from previous chunks.
+- Conformer convolution modules keep causal GLU history.
+- RNN-T decoding keeps prediction-network hidden and cell state.
+
+## Language
+
+Default language prompt is `auto`.
+
+Examples:
+
+```bash
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l auto
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l en-US
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l ko-KR
+```
+
+Use `--strip-tags` to remove emitted language tags such as `<en-US>`.
+
+## Kernels
+
+The public kernel surface covers the current hot path:
+
+- `nemo_dot_f32`
+- `nemo_attention_score_f32`
+- `nemo_matvec_f32`
+- `nemo_argmax_matvec_f32`
+- `nemo_vec_axpy_inplace`
+- `nemo_preconv_emit_f32`
+- `nemo_fft512_power_f32`
+
+Backends:
+
+- `nemotron_asr_kernels_generic.c`: scalar C fallback.
+- `nemotron_asr_kernels_neon.c`: ARM NEON implementations for dense math,
+  attention score, residual axpy, and pointwise streaming preconv.
+- `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for dense math,
+  attention score, residual axpy, and pointwise streaming preconv.
+
+The normal convolution, layer norm, softmax, activation, and model-binding
+utilities live in the shared runtime code.
+
+## Model Facts
+
+- Audio: 16 kHz mono.
+- Features: 128 log-mel bins, `n_fft=512`, `win=400`, `hop=160`.
+- Encoder: 24-layer cache-aware FastConformer.
+- Encoder width: `d_model=1024`.
+- Attention: 8 heads, 128 dimensions per head.
+- Subsampling: causal `dw_striding`, factor 8.
+- Pre-encoder flatten size: `256 * 17`.
+- Prompt: language one-hot of size 128, projected into encoder output.
+- Decoder: RNN-T greedy decoding with 2-layer LSTM prediction network.
+- Joint: encoder projection, prediction projection, ReLU, vocabulary classifier.
+
+See `MODEL.md` for the tensor mapping and kernel-priority analysis.
+
+## API Sketch
+
+```c
+nemo_ctx_t *ctx = nemo_load("nemotron-3.5-asr-streaming-0.6b.bin");
+nemo_set_language(ctx, "ko-KR");
+ctx->att_right = 3;
+ctx->strip_lang_tags = 1;
+
+char *text = nemo_transcribe(ctx, "audio.wav");
+free(text);
+nemo_free(ctx);
+```
+
+Lower-level streaming pieces are also exposed:
+
+- `nemo_mel_stream_create/accept/free`
+- `nemo_encoder_stream_create/accept/free`
+- `nemo_rnnt_stream_create/accept/finish/free`
+- `nemo_rnnt_stream_text`
+- `nemo_rnnt_stream_text_len`
+
+## Troubleshooting
+
+### Microphone is silent
+
+```bash
+./nemotron_asr_mic --list-devices
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin --device 1 --meter
+```
+
+Check macOS microphone permission for the app you launch from, such as Terminal,
+iTerm, or VS Code.
+
+### Output starts slowly
+
+Use a smaller chunk family:
+
+```bash
+--att-right 0
+--att-right 1
+```
+
+Smaller chunks reduce latency but may reduce accuracy.
+
+### Output quality is unstable
+
+Try the default chunk family first:
+
+```bash
+--att-right 3
+```
+
+For more right context:
+
+```bash
+--att-right 6
+--att-right 13
+```
+
+Larger chunks add latency but usually give the encoder more context.

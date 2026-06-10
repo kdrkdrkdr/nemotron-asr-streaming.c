@@ -169,6 +169,14 @@ int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *s,
     return 0;
 }
 
+const char *nemo_rnnt_stream_text(const nemo_rnnt_stream_t *s) {
+    return (s && s->text.data) ? s->text.data : "";
+}
+
+size_t nemo_rnnt_stream_text_len(const nemo_rnnt_stream_t *s) {
+    return (s && s->text.data) ? s->text.len : 0;
+}
+
 char *nemo_rnnt_stream_finish(nemo_rnnt_stream_t *s) {
     char *text = s->text.data;
     s->text.data = NULL;
