@@ -2,7 +2,7 @@
 """Convert Nemotron 3.5 ASR .nemo into the pure-C runtime binary format.
 
 The generated file is intentionally simple: a little-endian tensor stream with
-64-byte aligned float32 payloads, followed by the RNNT vocabulary strings.
+64-byte aligned tensor payloads, followed by the RNNT vocabulary strings.
 Runtime inference does not need Python, PyTorch, NeMo, YAML, or SentencePiece.
 """
 
@@ -15,12 +15,15 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 
 
 MAGIC = b"NM35ASR\0"
 VERSION = 1
+DTYPE_F32 = 1
+DTYPE_BF16 = 2
 
 
 def align64(f):
@@ -58,7 +61,53 @@ def load_nemo(nemo_path: Path, work_dir: Path):
     return cfg, state
 
 
-def write_model(out_path: Path, cfg: dict, state: dict):
+def should_write_bf16(key: str, tensor: torch.Tensor, enabled: bool) -> bool:
+    if not enabled or not key.endswith(".weight"):
+        return False
+    if tensor.numel() == 0:
+        return False
+
+    linear_suffixes = (
+        "encoder.pre_encode.out.weight",
+        "prompt_kernel.0.weight",
+        "prompt_kernel.2.weight",
+        "joint.pred.weight",
+        "joint.enc.weight",
+        "joint.joint_net.2.weight",
+    )
+    if key in linear_suffixes:
+        return True
+
+    if key.startswith("decoder.prediction.dec_rnn.lstm.weight_"):
+        return True
+
+    if key.startswith("encoder.layers."):
+        return any(s in key for s in (
+            ".feed_forward1.linear1.weight",
+            ".feed_forward1.linear2.weight",
+            ".feed_forward2.linear1.weight",
+            ".feed_forward2.linear2.weight",
+            ".self_attn.linear_q.weight",
+            ".self_attn.linear_k.weight",
+            ".self_attn.linear_v.weight",
+            ".self_attn.linear_out.weight",
+            ".self_attn.linear_pos.weight",
+            ".conv.pointwise_conv1.weight",
+            ".conv.pointwise_conv2.weight",
+        ))
+
+    return False
+
+
+def tensor_bf16_bytes(tensor: torch.Tensor) -> bytes:
+    arr = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
+    bits = arr.view(np.uint32)
+    rounded = bits + (((bits >> 16) & 1) + 0x7FFF)
+    bf16 = (rounded >> 16).astype("<u2", copy=False)
+    return bf16.tobytes(order="C")
+
+
+def write_model(out_path: Path, cfg: dict, state: dict, bf16_linear_weights: bool = False):
     vocab = list(cfg["joint"]["vocabulary"])
     keys = list(state.keys())
     with out_path.open("wb") as f:
@@ -73,8 +122,13 @@ def write_model(out_path: Path, cfg: dict, state: dict):
                 raise ValueError(f"tensor name too long: {key}")
             dims = list(tensor.shape)
             dims4 = dims + [1] * (4 - len(dims))
-            raw = tensor.numpy().tobytes(order="C")
-            f.write(struct.pack("<HBB", len(name), len(dims), 1))
+            if should_write_bf16(key, tensor, bf16_linear_weights):
+                dtype = DTYPE_BF16
+                raw = tensor_bf16_bytes(tensor)
+            else:
+                dtype = DTYPE_F32
+                raw = tensor.numpy().tobytes(order="C")
+            f.write(struct.pack("<HBB", len(name), len(dims), dtype))
             f.write(name)
             f.write(struct.pack("<QQQQ", *dims4[:4]))
             f.write(struct.pack("<Q", len(raw)))
@@ -93,16 +147,18 @@ def main():
     ap.add_argument("nemo", type=Path, help="nemotron-3.5-asr-streaming-0.6b.nemo")
     ap.add_argument("-o", "--output", type=Path, default=Path("nemotron-3.5-asr-streaming-0.6b.bin"))
     ap.add_argument("--work-dir", type=Path, default=None, help="Reuse/extract into this directory")
+    ap.add_argument("--bf16-linear-weights", action="store_true",
+                    help="Store dense linear/RNN-T classifier weights as BF16")
     args = ap.parse_args()
 
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=True)
         cfg, state = load_nemo(args.nemo, args.work_dir)
-        write_model(args.output, cfg, state)
+        write_model(args.output, cfg, state, args.bf16_linear_weights)
     else:
         with tempfile.TemporaryDirectory(prefix="nemotron_nemo_") as td:
             cfg, state = load_nemo(args.nemo, Path(td))
-            write_model(args.output, cfg, state)
+            write_model(args.output, cfg, state, args.bf16_linear_weights)
 
     size_gb = os.path.getsize(args.output) / (1024**3)
     print(f"wrote {args.output} ({size_gb:.2f} GiB)")

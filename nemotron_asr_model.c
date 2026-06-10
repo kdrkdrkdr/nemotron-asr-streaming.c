@@ -60,44 +60,73 @@ static int bind_tensor(const nemo_model_t *m, const char *name, const float **ds
         fprintf(stderr, "nemotron: missing tensor %s\n", name);
         return -1;
     }
+    if (t->dtype != NEMO_TENSOR_F32 || !t->data) {
+        fprintf(stderr, "nemotron: tensor %s is not float32\n", name);
+        return -1;
+    }
     *dst = t->data;
     return 0;
+}
+
+static int bind_weight(const nemo_model_t *m, const char *name, nemo_weight_t *dst) {
+    const nemo_tensor_t *t = nemo_model_find(m, name);
+    if (!t) {
+        fprintf(stderr, "nemotron: missing tensor %s\n", name);
+        return -1;
+    }
+    memset(dst, 0, sizeof(*dst));
+    dst->dtype = t->dtype;
+    if (t->dtype == NEMO_TENSOR_F32 && t->data) {
+        dst->f32 = t->data;
+        return 0;
+    }
+    if (t->dtype == NEMO_TENSOR_BF16 && t->data_bf16) {
+        dst->bf16 = t->data_bf16;
+        return 0;
+    }
+    fprintf(stderr, "nemotron: tensor %s has unsupported weight dtype %u\n", name, t->dtype);
+    return -1;
 }
 
 static int bind_layer(nemo_model_t *m, int i) {
     char key[256];
     nemo_enc_layer_t *l = &m->encoder.layers[i];
-#define BIND(field, suffix) do { \
+#define BIND_TENSOR(field, suffix) do { \
     snprintf(key, sizeof(key), "encoder.layers.%d.%s", i, suffix); \
     if (bind_tensor(m, key, &l->field) != 0) return -1; \
 } while (0)
-    BIND(norm_ff1_w, "norm_feed_forward1.weight");
-    BIND(norm_ff1_b, "norm_feed_forward1.bias");
-    BIND(ff1_linear1_w, "feed_forward1.linear1.weight");
-    BIND(ff1_linear2_w, "feed_forward1.linear2.weight");
-    BIND(norm_conv_w, "norm_conv.weight");
-    BIND(norm_conv_b, "norm_conv.bias");
-    BIND(conv_pw1_w, "conv.pointwise_conv1.weight");
-    BIND(conv_dw_w, "conv.depthwise_conv.weight");
-    BIND(conv_norm_w, "conv.batch_norm.weight");
-    BIND(conv_norm_b, "conv.batch_norm.bias");
-    BIND(conv_pw2_w, "conv.pointwise_conv2.weight");
-    BIND(norm_att_w, "norm_self_att.weight");
-    BIND(norm_att_b, "norm_self_att.bias");
-    BIND(pos_bias_u, "self_attn.pos_bias_u");
-    BIND(pos_bias_v, "self_attn.pos_bias_v");
-    BIND(att_q_w, "self_attn.linear_q.weight");
-    BIND(att_k_w, "self_attn.linear_k.weight");
-    BIND(att_v_w, "self_attn.linear_v.weight");
-    BIND(att_out_w, "self_attn.linear_out.weight");
-    BIND(att_pos_w, "self_attn.linear_pos.weight");
-    BIND(norm_ff2_w, "norm_feed_forward2.weight");
-    BIND(norm_ff2_b, "norm_feed_forward2.bias");
-    BIND(ff2_linear1_w, "feed_forward2.linear1.weight");
-    BIND(ff2_linear2_w, "feed_forward2.linear2.weight");
-    BIND(norm_out_w, "norm_out.weight");
-    BIND(norm_out_b, "norm_out.bias");
-#undef BIND
+#define BIND_WEIGHT(field, suffix) do { \
+    snprintf(key, sizeof(key), "encoder.layers.%d.%s", i, suffix); \
+    if (bind_weight(m, key, &l->field) != 0) return -1; \
+} while (0)
+    BIND_TENSOR(norm_ff1_w, "norm_feed_forward1.weight");
+    BIND_TENSOR(norm_ff1_b, "norm_feed_forward1.bias");
+    BIND_WEIGHT(ff1_linear1_w, "feed_forward1.linear1.weight");
+    BIND_WEIGHT(ff1_linear2_w, "feed_forward1.linear2.weight");
+    BIND_TENSOR(norm_conv_w, "norm_conv.weight");
+    BIND_TENSOR(norm_conv_b, "norm_conv.bias");
+    BIND_WEIGHT(conv_pw1_w, "conv.pointwise_conv1.weight");
+    BIND_TENSOR(conv_dw_w, "conv.depthwise_conv.weight");
+    BIND_TENSOR(conv_norm_w, "conv.batch_norm.weight");
+    BIND_TENSOR(conv_norm_b, "conv.batch_norm.bias");
+    BIND_WEIGHT(conv_pw2_w, "conv.pointwise_conv2.weight");
+    BIND_TENSOR(norm_att_w, "norm_self_att.weight");
+    BIND_TENSOR(norm_att_b, "norm_self_att.bias");
+    BIND_TENSOR(pos_bias_u, "self_attn.pos_bias_u");
+    BIND_TENSOR(pos_bias_v, "self_attn.pos_bias_v");
+    BIND_WEIGHT(att_q_w, "self_attn.linear_q.weight");
+    BIND_WEIGHT(att_k_w, "self_attn.linear_k.weight");
+    BIND_WEIGHT(att_v_w, "self_attn.linear_v.weight");
+    BIND_WEIGHT(att_out_w, "self_attn.linear_out.weight");
+    BIND_WEIGHT(att_pos_w, "self_attn.linear_pos.weight");
+    BIND_TENSOR(norm_ff2_w, "norm_feed_forward2.weight");
+    BIND_TENSOR(norm_ff2_b, "norm_feed_forward2.bias");
+    BIND_WEIGHT(ff2_linear1_w, "feed_forward2.linear1.weight");
+    BIND_WEIGHT(ff2_linear2_w, "feed_forward2.linear2.weight");
+    BIND_TENSOR(norm_out_w, "norm_out.weight");
+    BIND_TENSOR(norm_out_b, "norm_out.bias");
+#undef BIND_TENSOR
+#undef BIND_WEIGHT
     return 0;
 }
 
@@ -117,32 +146,32 @@ static int bind_known_tensors(nemo_model_t *m) {
     if (bind_tensor(m, "encoder.pre_encode.conv.5.bias", &e->pre_conv5_b) != 0) return -1;
     if (bind_tensor(m, "encoder.pre_encode.conv.6.weight", &e->pre_conv6_w) != 0) return -1;
     if (bind_tensor(m, "encoder.pre_encode.conv.6.bias", &e->pre_conv6_b) != 0) return -1;
-    if (bind_tensor(m, "encoder.pre_encode.out.weight", &e->pre_out_w) != 0) return -1;
+    if (bind_weight(m, "encoder.pre_encode.out.weight", &e->pre_out_w) != 0) return -1;
     if (bind_tensor(m, "encoder.pre_encode.out.bias", &e->pre_out_b) != 0) return -1;
     for (int i = 0; i < NEMO_ENC_LAYERS; i++) if (bind_layer(m, i) != 0) return -1;
-    if (bind_tensor(m, "prompt_kernel.0.weight", &e->prompt0_w) != 0) return -1;
+    if (bind_weight(m, "prompt_kernel.0.weight", &e->prompt0_w) != 0) return -1;
     if (bind_tensor(m, "prompt_kernel.0.bias", &e->prompt0_b) != 0) return -1;
-    if (bind_tensor(m, "prompt_kernel.2.weight", &e->prompt2_w) != 0) return -1;
+    if (bind_weight(m, "prompt_kernel.2.weight", &e->prompt2_w) != 0) return -1;
     if (bind_tensor(m, "prompt_kernel.2.bias", &e->prompt2_b) != 0) return -1;
 
     if (bind_tensor(m, "decoder.prediction.embed.weight", &d->embed_w) != 0) return -1;
     for (int l = 0; l < NEMO_PRED_LAYERS; l++) {
         char key[128];
         snprintf(key, sizeof(key), "decoder.prediction.dec_rnn.lstm.weight_ih_l%d", l);
-        if (bind_tensor(m, key, &d->lstm_w_ih[l]) != 0) return -1;
+        if (bind_weight(m, key, &d->lstm_w_ih[l]) != 0) return -1;
         snprintf(key, sizeof(key), "decoder.prediction.dec_rnn.lstm.weight_hh_l%d", l);
-        if (bind_tensor(m, key, &d->lstm_w_hh[l]) != 0) return -1;
+        if (bind_weight(m, key, &d->lstm_w_hh[l]) != 0) return -1;
         snprintf(key, sizeof(key), "decoder.prediction.dec_rnn.lstm.bias_ih_l%d", l);
         if (bind_tensor(m, key, &d->lstm_b_ih[l]) != 0) return -1;
         snprintf(key, sizeof(key), "decoder.prediction.dec_rnn.lstm.bias_hh_l%d", l);
         if (bind_tensor(m, key, &d->lstm_b_hh[l]) != 0) return -1;
     }
 
-    if (bind_tensor(m, "joint.pred.weight", &j->pred_w) != 0) return -1;
+    if (bind_weight(m, "joint.pred.weight", &j->pred_w) != 0) return -1;
     if (bind_tensor(m, "joint.pred.bias", &j->pred_b) != 0) return -1;
-    if (bind_tensor(m, "joint.enc.weight", &j->enc_w) != 0) return -1;
+    if (bind_weight(m, "joint.enc.weight", &j->enc_w) != 0) return -1;
     if (bind_tensor(m, "joint.enc.bias", &j->enc_b) != 0) return -1;
-    if (bind_tensor(m, "joint.joint_net.2.weight", &j->out_w) != 0) return -1;
+    if (bind_weight(m, "joint.joint_net.2.weight", &j->out_w) != 0) return -1;
     if (bind_tensor(m, "joint.joint_net.2.bias", &j->out_b) != 0) return -1;
     return 0;
 }
@@ -199,7 +228,8 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
         uint16_t name_len = rd_u16(&p);
         uint8_t ndims = *p++;
         uint8_t dtype = *p++;
-        if (dtype != 1 || ndims > 4 || p + name_len + 4 * 8 + 8 > end) {
+        if ((dtype != NEMO_TENSOR_F32 && dtype != NEMO_TENSOR_BF16) ||
+            ndims > 4 || p + name_len + 4 * 8 + 8 > end) {
             fprintf(stderr, "nemotron: corrupt tensor table\n");
             nemo_model_free(model);
             return -1;
@@ -216,7 +246,9 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
             return -1;
         }
         model->tensors[ti].name = name;
-        model->tensors[ti].data = (const float *)p;
+        model->tensors[ti].data = dtype == NEMO_TENSOR_F32 ? (const float *)p : NULL;
+        model->tensors[ti].data_bf16 = dtype == NEMO_TENSOR_BF16 ? (const uint16_t *)p : NULL;
+        model->tensors[ti].dtype = dtype;
         model->tensors[ti].ndims = ndims;
         model->tensors[ti].nbytes = nbytes;
         p += nbytes;

@@ -144,8 +144,8 @@ static int enc_stream_build_rel_pos(const nemo_ctx_t *ctx, enc_stream_state_t *s
             free(pe);
             return -1;
         }
-        nemo_linear_nobias(s->rel_pos[i], pe, ctx->model.encoder.layers[i].att_pos_w,
-                           s->pos_len, NEMO_D_MODEL, NEMO_D_MODEL);
+        nemo_linear_nobias_weight(s->rel_pos[i], pe, &ctx->model.encoder.layers[i].att_pos_w,
+                                  s->pos_len, NEMO_D_MODEL, NEMO_D_MODEL);
     }
     free(pe);
     return 0;
@@ -304,7 +304,7 @@ static int preenc_stream_accept(const nemo_ctx_t *ctx, preenc_stream_state_t *s,
         }
     }
     free(x5);
-    nemo_linear(proj, flat, e->pre_out_w, e->pre_out_b, t5, NEMO_PREENC_IN, NEMO_D_MODEL);
+    nemo_linear_weight(proj, flat, &e->pre_out_w, e->pre_out_b, t5, NEMO_PREENC_IN, NEMO_D_MODEL);
     free(flat);
     *out = proj;
     *out_t = t5;
@@ -340,9 +340,9 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
     float *scores = s->att_scores;
     const float *p = s->rel_pos[layer];
     if (!q || !k_cur || !v_cur || !ctxv || !scores || !p) return -1;
-    nemo_linear3_nobias(q, k_cur, v_cur, x,
-                        l->att_q_w, l->att_k_w, l->att_v_w,
-                        t, NEMO_D_MODEL, NEMO_D_MODEL);
+    nemo_linear3_nobias_weight(q, k_cur, v_cur, x,
+                               &l->att_q_w, &l->att_k_w, &l->att_v_w,
+                               t, NEMO_D_MODEL, NEMO_D_MODEL);
 
     const float scale = 1.0f / sqrtf((float)NEMO_HEAD_DIM);
     for (int qi = 0; qi < t; qi++) {
@@ -376,7 +376,7 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
             }
         }
     }
-    nemo_linear_nobias(out, ctxv, l->att_out_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
+    nemo_linear_nobias_weight(out, ctxv, &l->att_out_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
     int next_len = s->att_len[layer];
     int next_v_len = s->att_len[layer];
     cache_append(s->att_k[layer], &next_len, s->att_cap, k_cur, t, NEMO_D_MODEL);
@@ -393,7 +393,7 @@ static int conformer_conv_stream(const nemo_enc_layer_t *l, enc_stream_state_t *
     float *dw = s->conv_dw;
     float *norm = s->conv_norm;
     if (!pw || !glu || !dw || !norm) return -1;
-    nemo_linear_nobias(pw, x, l->conv_pw1_w, t, NEMO_D_MODEL, 2 * NEMO_D_MODEL);
+    nemo_linear_nobias_weight(pw, x, &l->conv_pw1_w, t, NEMO_D_MODEL, 2 * NEMO_D_MODEL);
     for (int i = 0; i < t; i++) {
         for (int d = 0; d < NEMO_D_MODEL; d++) {
             float a = pw[(size_t)i * 2 * NEMO_D_MODEL + d];
@@ -421,7 +421,7 @@ static int conformer_conv_stream(const nemo_enc_layer_t *l, enc_stream_state_t *
     cache_append(s->conv_glu[layer], &s->conv_len[layer], s->conv_cap, glu, t, NEMO_D_MODEL);
     nemo_layer_norm(norm, dw, l->conv_norm_w, l->conv_norm_b, t, NEMO_D_MODEL, LN_EPS);
     nemo_swish(norm, t * NEMO_D_MODEL);
-    nemo_linear_nobias(out, norm, l->conv_pw2_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
+    nemo_linear_nobias_weight(out, norm, &l->conv_pw2_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
     return 0;
 }
 
@@ -434,9 +434,9 @@ static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
     if (!norm || !ff || !tmp) return -1;
 
     nemo_layer_norm(norm, x, l->norm_ff1_w, l->norm_ff1_b, t, NEMO_D_MODEL, LN_EPS);
-    nemo_linear_nobias(ff, norm, l->ff1_linear1_w, t, NEMO_D_MODEL, NEMO_FFN_DIM);
+    nemo_linear_nobias_weight(ff, norm, &l->ff1_linear1_w, t, NEMO_D_MODEL, NEMO_FFN_DIM);
     nemo_swish(ff, t * NEMO_FFN_DIM);
-    nemo_linear_nobias(tmp, ff, l->ff1_linear2_w, t, NEMO_FFN_DIM, NEMO_D_MODEL);
+    nemo_linear_nobias_weight(tmp, ff, &l->ff1_linear2_w, t, NEMO_FFN_DIM, NEMO_D_MODEL);
     nemo_vec_axpy_inplace(x, tmp, 0.5f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(norm, x, l->norm_att_w, l->norm_att_b, t, NEMO_D_MODEL, LN_EPS);
@@ -448,9 +448,9 @@ static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
     nemo_vec_axpy_inplace(x, tmp, 1.0f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(norm, x, l->norm_ff2_w, l->norm_ff2_b, t, NEMO_D_MODEL, LN_EPS);
-    nemo_linear_nobias(ff, norm, l->ff2_linear1_w, t, NEMO_D_MODEL, NEMO_FFN_DIM);
+    nemo_linear_nobias_weight(ff, norm, &l->ff2_linear1_w, t, NEMO_D_MODEL, NEMO_FFN_DIM);
     nemo_swish(ff, t * NEMO_FFN_DIM);
-    nemo_linear_nobias(tmp, ff, l->ff2_linear2_w, t, NEMO_FFN_DIM, NEMO_D_MODEL);
+    nemo_linear_nobias_weight(tmp, ff, &l->ff2_linear2_w, t, NEMO_FFN_DIM, NEMO_D_MODEL);
     nemo_vec_axpy_inplace(x, tmp, 0.5f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(tmp, x, l->norm_out_w, l->norm_out_b, t, NEMO_D_MODEL, LN_EPS);
@@ -464,10 +464,10 @@ static int apply_prompt(const nemo_ctx_t *ctx, enc_stream_state_t *s, float *x, 
     float *h = s->layer_ff;
     float *y = s->layer_tmp;
     if (!h || !y) return -1;
-    nemo_prompt_linear_relu(h, x, e->prompt0_w, e->prompt0_b,
-                            t, NEMO_D_MODEL, NEMO_NUM_PROMPTS, ctx->prompt_id,
-                            2 * NEMO_D_MODEL);
-    nemo_linear(y, h, e->prompt2_w, e->prompt2_b, t, 2 * NEMO_D_MODEL, NEMO_D_MODEL);
+    nemo_prompt_linear_relu_weight(h, x, &e->prompt0_w, e->prompt0_b,
+                                   t, NEMO_D_MODEL, NEMO_NUM_PROMPTS, ctx->prompt_id,
+                                   2 * NEMO_D_MODEL);
+    nemo_linear_weight(y, h, &e->prompt2_w, e->prompt2_b, t, 2 * NEMO_D_MODEL, NEMO_D_MODEL);
     memcpy(x, y, (size_t)t * NEMO_D_MODEL * sizeof(float));
     return 0;
 }

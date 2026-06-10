@@ -28,26 +28,29 @@ mmap-friendly `.bin` file.
 # Convert the original NeMo archive once.
 python3 tools/convert_nemo.py \
   ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
-  -o nemotron-3.5-asr-streaming-0.6b.bin
+  -o nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  --bf16-linear-weights
 
 # Build the normal WAV CLI.
 make
 
 # Transcribe a WAV file.
 ./nemotron_asr \
-  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
   -i ../qwen-asr/samples/jfk.wav \
   -l en-US \
   --strip-tags
 ```
 
-Conversion requires Python with `torch` and `yaml`. Inference does not.
+Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not.
 
 ## Features
 
 - **Pure C inference**: C11 runtime with libc/libm/pthread only by default.
 - **Memory-mapped model file**: converted weights are mmap'd from a compact
   tensor stream.
+- **Mixed BF16 linear weights**: optional converter path stores dense linear,
+  LSTM, and vocabulary classifier weights as BF16 and runs them directly.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
   cache-aware `att_context_size` right context.
 - **Incremental front end**: audio samples and mel frames are accepted
@@ -97,14 +100,26 @@ python3 tools/convert_nemo.py \
   -o nemotron-3.5-asr-streaming-0.6b.bin
 ```
 
+Recommended smaller/faster mixed-weight file:
+
+```bash
+python3 tools/convert_nemo.py \
+  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
+  -o nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  --bf16-linear-weights
+```
+
 The converter reads:
 
 - `model_config.yaml`
 - `model_weights.ckpt`
 - `cfg["joint"]["vocabulary"]`
 
-It writes a little-endian `.bin` file containing 64-byte-aligned float32 tensor
-payloads followed by vocabulary strings.
+It writes a little-endian `.bin` file containing 64-byte-aligned tensor payloads
+followed by vocabulary strings. By default all tensors are float32. With
+`--bf16-linear-weights`, dense encoder, prompt, RNN-T prediction, and joint
+classifier weights are written as BF16 while normalization, bias, convolution,
+mel, and embedding tensors remain float32.
 
 ## WAV Usage
 
@@ -261,6 +276,9 @@ The public kernel surface covers the current hot path:
 - `nemo_linear3_nobias` for fused encoder Q/K/V projection
 - `nemo_prompt_linear_relu` for language prompt projection
 - `nemo_lstm_gates_f32` for fused RNN-T prediction LSTM gates
+- typed-weight variants such as `nemo_linear_weight`,
+  `nemo_linear3_nobias_weight`, and `nemo_argmax_matvec_weight` for direct
+  f32/BF16 dispatch
 
 Backends:
 
@@ -280,6 +298,8 @@ Threading:
 - Large `nemo_linear`, `nemo_matvec_f32`, and `nemo_argmax_matvec_f32` calls are
   split across output rows.
 - Small operations stay single-threaded to avoid scheduling overhead.
+- BF16 linear weights are consumed directly instead of being expanded into a
+  full float32 side buffer.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -289,8 +309,10 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 |---------------|-----------|----------|
 | native, `-t 1` | 9.65 s | 1.14x |
 | native, `-t 8` | 3.64 s | 3.02x |
+| native, BF16 linear, `-t 8` | 2.29 s | 4.81x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
+| generic, BF16 linear, `-t 8` | 3.37 s | 3.27x |
 
 ## Model Facts
 

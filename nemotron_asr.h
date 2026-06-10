@@ -37,6 +37,8 @@
 typedef struct {
     const char *name;
     const float *data;
+    const uint16_t *data_bf16;
+    uint8_t dtype;
     uint32_t ndims;
     uint64_t dims[4];
     uint64_t nbytes;
@@ -44,14 +46,15 @@ typedef struct {
 
 typedef struct {
     const float *norm_ff1_w, *norm_ff1_b;
-    const float *ff1_linear1_w, *ff1_linear2_w;
+    nemo_weight_t ff1_linear1_w, ff1_linear2_w;
     const float *norm_conv_w, *norm_conv_b;
-    const float *conv_pw1_w, *conv_dw_w, *conv_norm_w, *conv_norm_b, *conv_pw2_w;
+    nemo_weight_t conv_pw1_w, conv_pw2_w;
+    const float *conv_dw_w, *conv_norm_w, *conv_norm_b;
     const float *norm_att_w, *norm_att_b;
     const float *pos_bias_u, *pos_bias_v;
-    const float *att_q_w, *att_k_w, *att_v_w, *att_out_w, *att_pos_w;
+    nemo_weight_t att_q_w, att_k_w, att_v_w, att_out_w, att_pos_w;
     const float *norm_ff2_w, *norm_ff2_b;
-    const float *ff2_linear1_w, *ff2_linear2_w;
+    nemo_weight_t ff2_linear1_w, ff2_linear2_w;
     const float *norm_out_w, *norm_out_b;
 } nemo_enc_layer_t;
 
@@ -64,26 +67,26 @@ typedef struct {
     const float *pre_conv3_w, *pre_conv3_b;
     const float *pre_conv5_w, *pre_conv5_b;
     const float *pre_conv6_w, *pre_conv6_b;
-    const float *pre_out_w, *pre_out_b;
+    nemo_weight_t pre_out_w;
+    const float *pre_out_b;
 
     nemo_enc_layer_t layers[NEMO_ENC_LAYERS];
 
-    const float *prompt0_w, *prompt0_b;
-    const float *prompt2_w, *prompt2_b;
+    nemo_weight_t prompt0_w, prompt2_w;
+    const float *prompt0_b, *prompt2_b;
 } nemo_encoder_t;
 
 typedef struct {
     const float *embed_w;
-    const float *lstm_w_ih[NEMO_PRED_LAYERS];
-    const float *lstm_w_hh[NEMO_PRED_LAYERS];
+    nemo_weight_t lstm_w_ih[NEMO_PRED_LAYERS];
+    nemo_weight_t lstm_w_hh[NEMO_PRED_LAYERS];
     const float *lstm_b_ih[NEMO_PRED_LAYERS];
     const float *lstm_b_hh[NEMO_PRED_LAYERS];
 } nemo_decoder_t;
 
 typedef struct {
-    const float *pred_w, *pred_b;
-    const float *enc_w, *enc_b;
-    const float *out_w, *out_b;
+    nemo_weight_t pred_w, enc_w, out_w;
+    const float *pred_b, *enc_b, *out_b;
 } nemo_joint_t;
 
 typedef struct {

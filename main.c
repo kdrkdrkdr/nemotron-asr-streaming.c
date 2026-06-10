@@ -82,8 +82,23 @@ int main(int argc, char **argv) {
     if (max_symbols > 0) ctx->max_symbols_per_step = max_symbols;
 
     if (model_info) {
+        int f32_tensors = 0;
+        int bf16_tensors = 0;
+        uint64_t f32_bytes = 0;
+        uint64_t bf16_bytes = 0;
+        for (int i = 0; i < ctx->model.n_tensors; i++) {
+            if (ctx->model.tensors[i].dtype == NEMO_TENSOR_BF16) {
+                bf16_tensors++;
+                bf16_bytes += ctx->model.tensors[i].nbytes;
+            } else {
+                f32_tensors++;
+                f32_bytes += ctx->model.tensors[i].nbytes;
+            }
+        }
         printf("Nemotron 3.5 ASR model\n");
         printf("  tensors: %d\n", ctx->model.n_tensors);
+        printf("  f32:     %d tensors, %.2f GiB\n", f32_tensors, (double)f32_bytes / (1024.0 * 1024.0 * 1024.0));
+        printf("  bf16:    %d tensors, %.2f GiB\n", bf16_tensors, (double)bf16_bytes / (1024.0 * 1024.0 * 1024.0));
         printf("  vocab:   %d (+ blank id %d)\n", ctx->model.vocab_size, NEMO_BLANK_ID);
         printf("  encoder: FastConformer cache-aware, layers=%d, d_model=%d, heads=%d\n",
                NEMO_ENC_LAYERS, NEMO_D_MODEL, NEMO_ENC_HEADS);

@@ -68,12 +68,12 @@ static int append_piece(nemo_ctx_t *ctx, strbuf_t *sb, int token) {
     return sb_append_bytes(sb, piece, strlen(piece));
 }
 
-static void lstm_layer_step(const float *input, const float *w_ih, const float *w_hh,
+static void lstm_layer_step(const float *input, const nemo_weight_t *w_ih, const nemo_weight_t *w_hh,
                             const float *b_ih, const float *b_hh,
                             float *h, float *c) {
     float gates[4 * NEMO_PRED_HIDDEN];
-    nemo_lstm_gates_f32(gates, input, h, w_ih, w_hh, b_ih, b_hh,
-                        NEMO_PRED_HIDDEN, 4 * NEMO_PRED_HIDDEN);
+    nemo_lstm_gates_weight(gates, input, h, w_ih, w_hh, b_ih, b_hh,
+                           NEMO_PRED_HIDDEN, 4 * NEMO_PRED_HIDDEN);
     for (int i = 0; i < NEMO_PRED_HIDDEN; i++) {
         float in_gate = nemo_sigmoid(gates[i]);
         float forget_gate = nemo_sigmoid(gates[NEMO_PRED_HIDDEN + i]);
@@ -94,10 +94,10 @@ static int pred_step(const nemo_ctx_t *ctx, int token, float *h, float *c, float
     } else {
         memset(in0, 0, sizeof(in0));
     }
-    lstm_layer_step(in0, d->lstm_w_ih[0], d->lstm_w_hh[0], d->lstm_b_ih[0], d->lstm_b_hh[0],
+    lstm_layer_step(in0, &d->lstm_w_ih[0], &d->lstm_w_hh[0], d->lstm_b_ih[0], d->lstm_b_hh[0],
                     h, c);
     memcpy(tmp0, h, sizeof(tmp0));
-    lstm_layer_step(tmp0, d->lstm_w_ih[1], d->lstm_w_hh[1], d->lstm_b_ih[1], d->lstm_b_hh[1],
+    lstm_layer_step(tmp0, &d->lstm_w_ih[1], &d->lstm_w_hh[1], d->lstm_b_ih[1], d->lstm_b_hh[1],
                     h + NEMO_PRED_HIDDEN, c + NEMO_PRED_HIDDEN);
     memcpy(out, h + NEMO_PRED_HIDDEN, sizeof(float) * NEMO_PRED_HIDDEN);
     return 0;
@@ -110,8 +110,8 @@ static int joint_argmax(const nemo_ctx_t *ctx, const float *enc_proj, const floa
         float v = enc_proj[i] + pred_proj[i];
         hidden[i] = v > 0.0f ? v : 0.0f;
     }
-    return nemo_argmax_matvec_f32(hidden, j->out_w, j->out_b,
-                                  NEMO_JOINT_HIDDEN, NEMO_VOCAB_WITH_BLANK, NULL);
+    return nemo_argmax_matvec_weight(hidden, &j->out_w, j->out_b,
+                                     NEMO_JOINT_HIDDEN, NEMO_VOCAB_WITH_BLANK, NULL);
 }
 
 void nemo_rnnt_stream_free(nemo_rnnt_stream_t *s) {
@@ -137,8 +137,8 @@ nemo_rnnt_stream_t *nemo_rnnt_stream_create(nemo_ctx_t *ctx) {
         nemo_rnnt_stream_free(s);
         return NULL;
     }
-    nemo_linear(s->pred_proj, s->pred_out, j->pred_w, j->pred_b,
-                1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
+    nemo_linear_weight(s->pred_proj, s->pred_out, &j->pred_w, j->pred_b,
+                       1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
     if (sb_reserve(&s->text, 256) != 0) {
         nemo_rnnt_stream_free(s);
         return NULL;
@@ -160,7 +160,7 @@ int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *s,
         s->enc_proj_cap = nc;
     }
     float *enc_proj = s->enc_proj;
-    nemo_linear(enc_proj, enc, j->enc_w, j->enc_b, enc_frames, NEMO_D_MODEL, NEMO_JOINT_HIDDEN);
+    nemo_linear_weight(enc_proj, enc, &j->enc_w, j->enc_b, enc_frames, NEMO_D_MODEL, NEMO_JOINT_HIDDEN);
     for (int t = 0; t < enc_frames; t++) {
         int emitted = 0;
         while (emitted < ctx->max_symbols_per_step) {
@@ -169,8 +169,8 @@ int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *s,
             if (append_piece(ctx, &s->text, tok) != 0) return -1;
             ctx->perf_tokens++;
             if (pred_step(ctx, tok, s->h, s->c, s->pred_out) != 0) return -1;
-            nemo_linear(s->pred_proj, s->pred_out, j->pred_w, j->pred_b,
-                        1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
+            nemo_linear_weight(s->pred_proj, s->pred_out, &j->pred_w, j->pred_b,
+                               1, NEMO_PRED_HIDDEN, NEMO_JOINT_HIDDEN);
             emitted++;
         }
     }

@@ -63,8 +63,9 @@ Per encoder layer:
 - attention score dot and value accumulation: about 1.2M MAC total
 
 Across 24 layers this is about 16.37B MAC for the encoder stack. The dominant
-hot path is therefore dense fp32 matvec/linear, including FFN, attention
+hot path is therefore dense matvec/linear, including FFN, attention
 projections, conformer pointwise conv, pre-encode projection, and joint argmax.
+The runtime supports those dense weights as either float32 or direct BF16.
 
 Secondary targets:
 
@@ -80,6 +81,8 @@ Current SIMD backends should therefore prioritize:
 - `nemo_vec_axpy_inplace` for residual and attention value accumulation
 - `nemo_preconv_emit_f32` for streaming causal subsampling conv stages
 - `nemo_fft512_power_f32` plus `nemo_dot_f32` for the mel front-end
+- typed dense wrappers such as `nemo_linear_weight` and
+  `nemo_argmax_matvec_weight` for direct BF16 linear weights
 
 CPU engine optimizations now mirror the useful qwen-asr patterns that apply to
 Nemotron's graph:
@@ -87,6 +90,8 @@ Nemotron's graph:
 - a persistent worker pool controlled by `nemo_set_threads`
 - output-row parallelism for large fp32 `nemo_linear` calls
 - threaded `nemo_matvec_f32` and `nemo_argmax_matvec_f32`
+- optional BF16 model conversion for dense linear, LSTM, and joint classifier
+  weights, consumed directly without expanding a full float32 copy
 - fused `nemo_linear3_nobias` for encoder Q/K/V projection
 - threaded `nemo_prompt_linear_relu` for language prompt projection
 - fused `nemo_lstm_gates_f32` for RNN-T prediction-network gate projection
@@ -103,6 +108,11 @@ layer. Fusing keeps the same math while scheduling one pass over
 The LSTM gate fusion applies the same idea to the prediction network: the
 input and recurrent projections are accumulated in one output-row pass instead
 of launching two matvecs and a separate residual add for every emitted token.
+
+The BF16 path is intentionally applied only to dense weights that are consumed
+by the typed linear/matvec wrappers. Biases, layer-norm parameters, depthwise
+convolution filters, mel front-end tensors, and the prediction embedding remain
+float32.
 
 Qwen-only kernels that are not used by the Nemotron graph should not be carried
 over just for symmetry.
