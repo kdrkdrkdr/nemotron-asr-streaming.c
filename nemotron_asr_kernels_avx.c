@@ -4,7 +4,9 @@
 
 #include <immintrin.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 static inline float hsum_m256(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
@@ -59,6 +61,69 @@ static inline float dot_f32_avx_inline(const float *a, const float *b, int n) {
 
 float nemo_dot_f32_avx(const float *a, const float *b, int n) {
     return dot_f32_avx_inline(a, b, n);
+}
+
+float nemo_dot_bf16_f32_avx(const float *a, const uint16_t *b, int n) {
+    int i = 0;
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    __m512 acc0 = _mm512_setzero_ps();
+    __m512 acc1 = _mm512_setzero_ps();
+    for (; i + 32 <= n; i += 32) {
+        __m256i b0 = _mm256_loadu_si256((const __m256i *)(b + i));
+        __m256i b1 = _mm256_loadu_si256((const __m256i *)(b + i + 16));
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i),
+                                _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b0), 16)),
+                                acc0);
+        acc1 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i + 16),
+                                _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(b1), 16)),
+                                acc1);
+    }
+    for (; i + 16 <= n; i += 16) {
+        __m256i bv = _mm256_loadu_si256((const __m256i *)(b + i));
+        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i),
+                                _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(bv), 16)),
+                                acc0);
+    }
+    float sum = _mm512_reduce_add_ps(_mm512_add_ps(acc0, acc1));
+#else
+    __m256 acc0 = _mm256_setzero_ps();
+    __m256 acc1 = _mm256_setzero_ps();
+    __m256 acc2 = _mm256_setzero_ps();
+    __m256 acc3 = _mm256_setzero_ps();
+    for (; i + 32 <= n; i += 32) {
+        __m128i b0 = _mm_loadu_si128((const __m128i *)(b + i));
+        __m128i b1 = _mm_loadu_si128((const __m128i *)(b + i + 8));
+        __m128i b2 = _mm_loadu_si128((const __m128i *)(b + i + 16));
+        __m128i b3 = _mm_loadu_si128((const __m128i *)(b + i + 24));
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                                _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(b0), 16)),
+                                acc0);
+        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 8),
+                                _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(b1), 16)),
+                                acc1);
+        acc2 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 16),
+                                _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(b2), 16)),
+                                acc2);
+        acc3 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i + 24),
+                                _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(b3), 16)),
+                                acc3);
+    }
+    acc0 = _mm256_add_ps(_mm256_add_ps(acc0, acc1), _mm256_add_ps(acc2, acc3));
+    for (; i + 8 <= n; i += 8) {
+        __m128i bv = _mm_loadu_si128((const __m128i *)(b + i));
+        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + i),
+                                _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(bv), 16)),
+                                acc0);
+    }
+    float sum = hsum_m256(acc0);
+#endif
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)b[i] << 16;
+        float wv;
+        memcpy(&wv, &bits, sizeof(wv));
+        sum += a[i] * wv;
+    }
+    return sum;
 }
 
 float nemo_attention_score_f32_avx(const float *q, const float *bias_u, const float *k,

@@ -167,11 +167,7 @@ static float nemo_bf16_to_f32(uint16_t x) {
 }
 
 static float nemo_dot_bf16_f32(const float *x, const uint16_t *w, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += x[i] * nemo_bf16_to_f32(w[i]);
-    }
-    return sum;
+    return nemo_dot_bf16_f32_impl(x, w, n);
 }
 
 static float nemo_weight_dot_row(const float *x, const nemo_weight_t *w, int row, int stride, int n) {

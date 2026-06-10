@@ -83,6 +83,7 @@ Current SIMD backends should therefore prioritize:
 - `nemo_fft512_power_f32` plus `nemo_dot_f32` for the mel front-end
 - typed dense wrappers such as `nemo_linear_weight` and
   `nemo_argmax_matvec_weight` for direct BF16 linear weights
+- `nemo_dot_bf16_f32_impl`, dispatched through generic, NEON, or AVX backends
 
 CPU engine optimizations now mirror the useful qwen-asr patterns that apply to
 Nemotron's graph:
@@ -92,6 +93,7 @@ Nemotron's graph:
 - threaded `nemo_matvec_f32` and `nemo_argmax_matvec_f32`
 - optional BF16 model conversion for dense linear, LSTM, and joint classifier
   weights, consumed directly without expanding a full float32 copy
+- architecture-dispatched BF16 row dot for those typed dense weights
 - fused `nemo_linear3_nobias` for encoder Q/K/V projection
 - threaded `nemo_prompt_linear_relu` for language prompt projection
 - fused `nemo_lstm_gates_f32` for RNN-T prediction-network gate projection

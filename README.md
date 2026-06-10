@@ -284,9 +284,11 @@ Backends:
 
 - `nemotron_asr_kernels_generic.c`: scalar C fallback.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for dense math,
-  attention score, residual axpy, and pointwise streaming preconv.
+  BF16 weight dot, attention score, residual axpy, and pointwise streaming
+  preconv.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for dense math,
-  attention score, residual axpy, and pointwise streaming preconv.
+  BF16 weight dot, attention score, residual axpy, and pointwise streaming
+  preconv.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -308,8 +310,8 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | build/options | inference | realtime |
 |---------------|-----------|----------|
 | native, `-t 1` | 9.65 s | 1.14x |
-| native, `-t 8` | 3.64 s | 3.02x |
-| native, BF16 linear, `-t 8` | 2.29 s | 4.81x |
+| native, `-t 8` | 3.60 s | 3.06x |
+| native, BF16 linear, `-t 8` | 2.37 s | 4.63x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
 | generic, BF16 linear, `-t 8` | 3.37 s | 3.27x |

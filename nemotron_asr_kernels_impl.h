@@ -5,7 +5,10 @@
 #ifndef NEMOTRON_ASR_KERNELS_IMPL_H
 #define NEMOTRON_ASR_KERNELS_IMPL_H
 
+#include <stdint.h>
+
 float nemo_dot_f32_generic(const float *a, const float *b, int n);
+float nemo_dot_bf16_f32_generic(const float *a, const uint16_t *b, int n);
 float nemo_attention_score_f32_generic(const float *q, const float *bias_u, const float *k,
                                        const float *bias_v, const float *p, int n);
 void nemo_matvec_f32_generic(float *y, const float *x, const float *w, const float *b,
@@ -22,6 +25,7 @@ void nemo_preconv_emit_f32_generic(float *out, const float *history, const float
 #ifdef NEMO_FORCE_GENERIC
 
 #define nemo_dot_f32_impl nemo_dot_f32_generic
+#define nemo_dot_bf16_f32_impl nemo_dot_bf16_f32_generic
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_generic
 #define nemo_matvec_f32_impl nemo_matvec_f32_generic
 #define nemo_argmax_matvec_f32_impl nemo_argmax_matvec_f32_generic
@@ -31,6 +35,7 @@ void nemo_preconv_emit_f32_generic(float *out, const float *history, const float
 
 #elif defined(__ARM_NEON)
 float nemo_dot_f32_neon(const float *a, const float *b, int n);
+float nemo_dot_bf16_f32_neon(const float *a, const uint16_t *b, int n);
 float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const float *k,
                                     const float *bias_v, const float *p, int n);
 void nemo_matvec_f32_neon(float *y, const float *x, const float *w, const float *b,
@@ -45,6 +50,7 @@ void nemo_preconv_emit_f32_neon(float *out, const float *history, const float *w
                                 int k, int stride, int left, int groups);
 
 #define nemo_dot_f32_impl nemo_dot_f32_neon
+#define nemo_dot_bf16_f32_impl nemo_dot_bf16_f32_neon
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_neon
 #define nemo_matvec_f32_impl nemo_matvec_f32_neon
 #define nemo_argmax_matvec_f32_impl nemo_argmax_matvec_f32_neon
@@ -54,6 +60,7 @@ void nemo_preconv_emit_f32_neon(float *out, const float *history, const float *w
 
 #elif defined(__AVX2__) && defined(__FMA__)
 float nemo_dot_f32_avx(const float *a, const float *b, int n);
+float nemo_dot_bf16_f32_avx(const float *a, const uint16_t *b, int n);
 float nemo_attention_score_f32_avx(const float *q, const float *bias_u, const float *k,
                                    const float *bias_v, const float *p, int n);
 void nemo_matvec_f32_avx(float *y, const float *x, const float *w, const float *b,
@@ -68,6 +75,7 @@ void nemo_preconv_emit_f32_avx(float *out, const float *history, const float *w,
                                int k, int stride, int left, int groups);
 
 #define nemo_dot_f32_impl nemo_dot_f32_avx
+#define nemo_dot_bf16_f32_impl nemo_dot_bf16_f32_avx
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_avx
 #define nemo_matvec_f32_impl nemo_matvec_f32_avx
 #define nemo_argmax_matvec_f32_impl nemo_argmax_matvec_f32_avx
@@ -77,6 +85,7 @@ void nemo_preconv_emit_f32_avx(float *out, const float *history, const float *w,
 
 #else
 #define nemo_dot_f32_impl nemo_dot_f32_generic
+#define nemo_dot_bf16_f32_impl nemo_dot_bf16_f32_generic
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_generic
 #define nemo_matvec_f32_impl nemo_matvec_f32_generic
 #define nemo_argmax_matvec_f32_impl nemo_argmax_matvec_f32_generic

@@ -4,7 +4,9 @@
 
 #include <arm_neon.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef __aarch64__
 #define NEMO_FMAQ_F32(acc, a, b) vfmaq_f32((acc), (a), (b))
@@ -45,6 +47,49 @@ static inline float dot_f32_neon_inline(const float *a, const float *b, int n) {
 
 float nemo_dot_f32_neon(const float *a, const float *b, int n) {
     return dot_f32_neon_inline(a, b, n);
+}
+
+float nemo_dot_bf16_f32_neon(const float *a, const uint16_t *b, int n) {
+    int i = 0;
+    float32x4_t acc0 = vdupq_n_f32(0.0f);
+    float32x4_t acc1 = vdupq_n_f32(0.0f);
+    float32x4_t acc2 = vdupq_n_f32(0.0f);
+    float32x4_t acc3 = vdupq_n_f32(0.0f);
+    for (; i + 16 <= n; i += 16) {
+        uint16x8_t b0 = vld1q_u16(b + i);
+        uint16x8_t b1 = vld1q_u16(b + i + 8);
+        acc0 = NEMO_FMAQ_F32(acc0,
+                              vld1q_f32(a + i),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(b0), 16)));
+        acc1 = NEMO_FMAQ_F32(acc1,
+                              vld1q_f32(a + i + 4),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(b0), 16)));
+        acc2 = NEMO_FMAQ_F32(acc2,
+                              vld1q_f32(a + i + 8),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(b1), 16)));
+        acc3 = NEMO_FMAQ_F32(acc3,
+                              vld1q_f32(a + i + 12),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(b1), 16)));
+    }
+    acc0 = vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3));
+    acc1 = vdupq_n_f32(0.0f);
+    for (; i + 8 <= n; i += 8) {
+        uint16x8_t bv = vld1q_u16(b + i);
+        acc0 = NEMO_FMAQ_F32(acc0,
+                              vld1q_f32(a + i),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(bv), 16)));
+        acc1 = NEMO_FMAQ_F32(acc1,
+                              vld1q_f32(a + i + 4),
+                              vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(bv), 16)));
+    }
+    float sum = hsum_f32x4(vaddq_f32(acc0, acc1));
+    for (; i < n; i++) {
+        uint32_t bits = (uint32_t)b[i] << 16;
+        float wv;
+        memcpy(&wv, &bits, sizeof(wv));
+        sum += a[i] * wv;
+    }
+    return sum;
 }
 
 float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const float *k,

@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <string.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -15,6 +16,19 @@ static inline float dot_f32_generic_inline(const float *a, const float *b, int n
 
 float nemo_dot_f32_generic(const float *a, const float *b, int n) {
     return dot_f32_generic_inline(a, b, n);
+}
+
+static inline float bf16_to_f32_generic(uint16_t x) {
+    uint32_t bits = (uint32_t)x << 16;
+    float v;
+    memcpy(&v, &bits, sizeof(v));
+    return v;
+}
+
+float nemo_dot_bf16_f32_generic(const float *a, const uint16_t *b, int n) {
+    float sum = 0.0f;
+    for (int i = 0; i < n; i++) sum += a[i] * bf16_to_f32_generic(b[i]);
+    return sum;
 }
 
 float nemo_attention_score_f32_generic(const float *q, const float *bias_u, const float *k,
