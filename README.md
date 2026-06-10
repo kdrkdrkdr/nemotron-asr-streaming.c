@@ -284,11 +284,11 @@ Backends:
 
 - `nemotron_asr_kernels_generic.c`: scalar C fallback.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for dense math,
-  BF16 weight dot, attention score, residual axpy, and pointwise streaming
-  preconv.
+  BF16 weight dot/matvec, attention score, residual axpy, and pointwise
+  streaming preconv.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for dense math,
-  BF16 weight dot, attention score, residual axpy, and pointwise streaming
-  preconv.
+  BF16 weight dot/matvec wrappers, attention score, residual axpy, and
+  pointwise streaming preconv.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -301,7 +301,8 @@ Threading:
   split across output rows.
 - Small operations stay single-threaded to avoid scheduling overhead.
 - BF16 linear weights are consumed directly instead of being expanded into a
-  full float32 side buffer.
+  full float32 side buffer. The NEON backend computes BF16 matvecs two output
+  rows at a time to reuse input vector loads.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -311,10 +312,10 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 |---------------|-----------|----------|
 | native, `-t 1` | 9.65 s | 1.14x |
 | native, `-t 8` | 3.60 s | 3.06x |
-| native, BF16 linear, `-t 8` | 2.37 s | 4.63x |
+| native, BF16 linear, `-t 8` | 2.16 s | 5.10x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
-| generic, BF16 linear, `-t 8` | 3.37 s | 3.27x |
+| generic, BF16 linear, `-t 8` | 3.41 s | 3.22x |
 
 ## Model Facts
 

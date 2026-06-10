@@ -92,6 +92,82 @@ float nemo_dot_bf16_f32_neon(const float *a, const uint16_t *b, int n) {
     return sum;
 }
 
+void nemo_bf16_matvec_fused_neon(float *y, const float *x, const uint16_t *w,
+                                 const float *b, int in_dim, int out_dim) {
+    int o = 0;
+    for (; o + 1 < out_dim; o += 2) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        float s0 = b ? b[o] : 0.0f;
+        float s1 = b ? b[o + 1] : 0.0f;
+        float32x4_t a0 = vdupq_n_f32(0.0f), a1 = vdupq_n_f32(0.0f);
+        float32x4_t a2 = vdupq_n_f32(0.0f), a3 = vdupq_n_f32(0.0f);
+        float32x4_t b0 = vdupq_n_f32(0.0f), b1 = vdupq_n_f32(0.0f);
+        float32x4_t b2 = vdupq_n_f32(0.0f), b3 = vdupq_n_f32(0.0f);
+        int k = 0;
+        for (; k + 16 <= in_dim; k += 16) {
+            float32x4_t x0 = vld1q_f32(x + k);
+            float32x4_t x1 = vld1q_f32(x + k + 4);
+            float32x4_t x2 = vld1q_f32(x + k + 8);
+            float32x4_t x3 = vld1q_f32(x + k + 12);
+            uint16x8_t r0a = vld1q_u16(w0 + k);
+            uint16x8_t r0b = vld1q_u16(w0 + k + 8);
+            uint16x8_t r1a = vld1q_u16(w1 + k);
+            uint16x8_t r1b = vld1q_u16(w1 + k + 8);
+            a0 = NEMO_FMAQ_F32(a0, x0, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r0a), 16)));
+            a1 = NEMO_FMAQ_F32(a1, x1, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r0a), 16)));
+            a2 = NEMO_FMAQ_F32(a2, x2, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r0b), 16)));
+            a3 = NEMO_FMAQ_F32(a3, x3, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r0b), 16)));
+            b0 = NEMO_FMAQ_F32(b0, x0, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r1a), 16)));
+            b1 = NEMO_FMAQ_F32(b1, x1, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r1a), 16)));
+            b2 = NEMO_FMAQ_F32(b2, x2, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r1b), 16)));
+            b3 = NEMO_FMAQ_F32(b3, x3, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r1b), 16)));
+        }
+        for (; k + 8 <= in_dim; k += 8) {
+            float32x4_t x0 = vld1q_f32(x + k);
+            float32x4_t x1 = vld1q_f32(x + k + 4);
+            uint16x8_t r0 = vld1q_u16(w0 + k);
+            uint16x8_t r1 = vld1q_u16(w1 + k);
+            a0 = NEMO_FMAQ_F32(a0, x0, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r0), 16)));
+            a1 = NEMO_FMAQ_F32(a1, x1, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r0), 16)));
+            b0 = NEMO_FMAQ_F32(b0, x0, vreinterpretq_f32_u32(vshll_n_u16(vget_low_u16(r1), 16)));
+            b1 = NEMO_FMAQ_F32(b1, x1, vreinterpretq_f32_u32(vshll_n_u16(vget_high_u16(r1), 16)));
+        }
+        s0 += hsum_f32x4(vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)));
+        s1 += hsum_f32x4(vaddq_f32(vaddq_f32(b0, b1), vaddq_f32(b2, b3)));
+        for (; k < in_dim; k++) {
+            uint32_t bits0 = (uint32_t)w0[k] << 16;
+            uint32_t bits1 = (uint32_t)w1[k] << 16;
+            float wv0, wv1;
+            memcpy(&wv0, &bits0, sizeof(wv0));
+            memcpy(&wv1, &bits1, sizeof(wv1));
+            s0 += x[k] * wv0;
+            s1 += x[k] * wv1;
+        }
+        y[o] = s0;
+        y[o + 1] = s1;
+    }
+    for (; o < out_dim; o++) {
+        y[o] = nemo_dot_bf16_f32_neon(x, w + (size_t)o * in_dim, in_dim) + (b ? b[o] : 0.0f);
+    }
+}
+
+int nemo_argmax_bf16_range_neon(const float *x, const uint16_t *w, const float *b,
+                                int in_dim, int start, int end, float *best_val_out) {
+    int best = start;
+    float best_val = -3.4028234663852886e38f;
+    for (int o = start; o < end; o++) {
+        float v = nemo_dot_bf16_f32_neon(x, w + (size_t)o * in_dim, in_dim) +
+                  (b ? b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    if (best_val_out) *best_val_out = best_val;
+    return best;
+}
+
 float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const float *k,
                                     const float *bias_v, const float *p, int n) {
     int i = 0;

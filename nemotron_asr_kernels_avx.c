@@ -126,6 +126,30 @@ float nemo_dot_bf16_f32_avx(const float *a, const uint16_t *b, int n) {
     return sum;
 }
 
+void nemo_bf16_matvec_fused_avx(float *y, const float *x, const uint16_t *w,
+                                const float *b, int in_dim, int out_dim) {
+    for (int o = 0; o < out_dim; o++) {
+        y[o] = nemo_dot_bf16_f32_avx(x, w + (size_t)o * in_dim, in_dim) +
+               (b ? b[o] : 0.0f);
+    }
+}
+
+int nemo_argmax_bf16_range_avx(const float *x, const uint16_t *w, const float *b,
+                               int in_dim, int start, int end, float *best_val_out) {
+    int best = start;
+    float best_val = -3.4028234663852886e38f;
+    for (int o = start; o < end; o++) {
+        float v = nemo_dot_bf16_f32_avx(x, w + (size_t)o * in_dim, in_dim) +
+                  (b ? b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    if (best_val_out) *best_val_out = best_val;
+    return best;
+}
+
 float nemo_attention_score_f32_avx(const float *q, const float *bias_u, const float *k,
                                    const float *bias_v, const float *p, int n) {
     int i = 0;
