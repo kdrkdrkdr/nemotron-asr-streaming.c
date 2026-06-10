@@ -10,6 +10,7 @@ static void usage(const char *argv0) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -m <file>       Converted Nemotron model bin\n");
     fprintf(stderr, "  -i <file>       Input WAV (PCM s16; resampled to 16 kHz if needed)\n");
+    fprintf(stderr, "  -t <n>          Number of worker threads (default: all CPUs, max 16)\n");
     fprintf(stderr, "  -l <lang>       Language prompt, e.g. en-US, ko-KR, auto (default auto)\n");
     fprintf(stderr, "  --att-right N   Right context in 80 ms encoder frames: 0,1,3,6,13 (default 3)\n");
     fprintf(stderr, "  --strip-tags    Remove emitted language tags like <en-US>\n");
@@ -25,12 +26,15 @@ int main(int argc, char **argv) {
     int strip_tags = 0;
     int att_right = 3;
     int max_symbols = 10;
+    int n_threads = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
             model = argv[++i];
         } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
             input = argv[++i];
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            n_threads = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
             lang = argv[++i];
         } else if (strcmp(argv[i], "--att-right") == 0 && i + 1 < argc) {
@@ -54,6 +58,12 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 1;
     }
+    if (n_threads < 0) {
+        fprintf(stderr, "nemotron: -t must be >= 1\n");
+        return 1;
+    }
+    if (n_threads == 0) n_threads = nemo_get_num_cpus();
+    nemo_set_threads(n_threads);
 
     nemo_ctx_t *ctx = nemo_load(model);
     if (!ctx) return 1;

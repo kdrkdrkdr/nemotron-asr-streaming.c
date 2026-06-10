@@ -45,7 +45,7 @@ Conversion requires Python with `torch` and `yaml`. Inference does not.
 
 ## Features
 
-- **Pure C inference**: C11 runtime with libc/libm only.
+- **Pure C inference**: C11 runtime with libc/libm/pthread only by default.
 - **Memory-mapped model file**: converted weights are mmap'd from a compact
   tensor stream.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
@@ -60,6 +60,14 @@ Conversion requires Python with `torch` and `yaml`. Inference does not.
   `ko-KR`.
 - **Native kernels**: generic C fallback plus NEON and AVX dispatch for hot
   math paths.
+- **Threaded dense path**: qwen-asr-style persistent worker pool for large
+  fp32 linear/matvec/argmax operations.
+- **Fused QKV projection**: encoder attention computes Q/K/V in one scheduled
+  projection pass to reduce dispatch overhead on small streaming chunks.
+- **Low-allocation streaming loop**: encoder layer scratch buffers are reused
+  across chunks.
+- **Optional BLAS build**: `make blas` can route larger dense batches through
+  Accelerate/OpenBLAS while keeping the default build dependency-free.
 - **Live testing**: macOS microphone CLI with input device selection and a
   real-time input meter.
 
@@ -68,6 +76,7 @@ Conversion requires Python with `torch` and `yaml`. Inference does not.
 ```bash
 make          # native optimized build
 make generic  # force scalar C fallback with NEMO_FORCE_GENERIC
+make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
 make clean
@@ -75,7 +84,8 @@ make clean
 
 `make` uses `-march=native`, `-ffast-math`, and LTO by default. On ARM builds it
 dispatches to NEON kernels. On AVX2+FMA x86 builds it dispatches to AVX kernels.
-Otherwise it uses the generic C backend.
+Otherwise it uses the generic C backend. `make blas` is optional; the normal
+build does not require BLAS.
 
 ## Convert Model
 
@@ -108,6 +118,7 @@ Useful options:
 ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l ko-KR
 ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l en-US --strip-tags
 ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav --att-right 6
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -t 8
 ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin --model-info
 ```
 
@@ -140,6 +151,7 @@ Select a device by index, AudioDeviceID, UID, or exact name:
 ./nemotron_asr_mic \
   -m nemotron-3.5-asr-streaming-0.6b.bin \
   --device 1 \
+  -t 8 \
   -l ko-KR \
   --strip-tags \
   --att-right 3 \
@@ -246,6 +258,8 @@ The public kernel surface covers the current hot path:
 - `nemo_vec_axpy_inplace`
 - `nemo_preconv_emit_f32`
 - `nemo_fft512_power_f32`
+- `nemo_linear3_nobias` for fused encoder Q/K/V projection
+- `nemo_prompt_linear_relu` for language prompt projection
 
 Backends:
 
@@ -257,6 +271,25 @@ Backends:
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
+
+Threading:
+
+- `nemo_set_threads()` controls a persistent worker pool, capped at 16 threads.
+- The CLI defaults to all online CPUs and accepts `-t N`.
+- Large `nemo_linear`, `nemo_matvec_f32`, and `nemo_argmax_matvec_f32` calls are
+  split across output rows.
+- Small operations stay single-threaded to avoid scheduling overhead.
+- `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
+  on the native kernels.
+
+Example JFK sample timing on an 8-core Apple Silicon laptop:
+
+| build/options | inference | realtime |
+|---------------|-----------|----------|
+| native, `-t 1` | 9.65 s | 1.14x |
+| native, `-t 8` | 3.62 s | 3.04x |
+| BLAS, `-t 8` | 3.63 s | 3.03x |
+| generic, `-t 8` | 4.71 s | 2.34x |
 
 ## Model Facts
 

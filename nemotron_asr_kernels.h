@@ -9,6 +9,9 @@
 
 float *nemo_alloc(size_t count, size_t elem);
 double nemo_time_ms(void);
+int nemo_get_num_cpus(void);
+void nemo_set_threads(int n_threads);
+int nemo_get_threads(void);
 
 float nemo_dot_f32(const float *a, const float *b, int n);
 float nemo_attention_score_f32(const float *q, const float *bias_u, const float *k,
@@ -35,6 +38,12 @@ void nemo_linear(float *y, const float *x, const float *w, const float *b,
                  int rows, int in_dim, int out_dim);
 void nemo_linear_nobias(float *y, const float *x, const float *w,
                         int rows, int in_dim, int out_dim);
+void nemo_linear3_nobias(float *y0, float *y1, float *y2, const float *x,
+                         const float *w0, const float *w1, const float *w2,
+                         int rows, int in_dim, int out_dim);
+void nemo_prompt_linear_relu(float *y, const float *x, const float *w, const float *b,
+                             int rows, int in_dim, int prompt_dim, int prompt_id,
+                             int out_dim);
 void nemo_layer_norm(float *y, const float *x, const float *w, const float *b,
                      int rows, int dim, float eps);
 void nemo_softmax(float *x, int n);

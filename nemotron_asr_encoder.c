@@ -12,6 +12,8 @@
 typedef struct {
     int att_cap;
     int conv_cap;
+    int scratch_t;
+    int scratch_scores;
     int pos_min;
     int pos_len;
     int att_len[NEMO_ENC_LAYERS];
@@ -20,6 +22,18 @@ typedef struct {
     float *att_v[NEMO_ENC_LAYERS];
     float *conv_glu[NEMO_ENC_LAYERS];
     float *rel_pos[NEMO_ENC_LAYERS];
+    float *layer_norm;
+    float *layer_ff;
+    float *layer_tmp;
+    float *att_q;
+    float *att_k_cur;
+    float *att_v_cur;
+    float *att_ctx;
+    float *att_scores;
+    float *conv_pw;
+    float *conv_glu_tmp;
+    float *conv_dw;
+    float *conv_norm;
 } enc_stream_state_t;
 
 typedef struct {
@@ -58,6 +72,18 @@ static void enc_stream_free(enc_stream_state_t *s) {
         free(s->conv_glu[i]);
         free(s->rel_pos[i]);
     }
+    free(s->layer_norm);
+    free(s->layer_ff);
+    free(s->layer_tmp);
+    free(s->att_q);
+    free(s->att_k_cur);
+    free(s->att_v_cur);
+    free(s->att_ctx);
+    free(s->att_scores);
+    free(s->conv_pw);
+    free(s->conv_glu_tmp);
+    free(s->conv_dw);
+    free(s->conv_norm);
     memset(s, 0, sizeof(*s));
 }
 
@@ -73,6 +99,30 @@ static int enc_stream_init(enc_stream_state_t *s, int att_cap, int conv_cap) {
             enc_stream_free(s);
             return -1;
         }
+    }
+    return 0;
+}
+
+static int enc_stream_init_scratch(enc_stream_state_t *s, int chunk) {
+    if (chunk < 1) chunk = 1;
+    s->scratch_t = chunk;
+    s->scratch_scores = s->att_cap + chunk;
+    s->layer_norm = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->layer_ff = nemo_alloc((size_t)chunk * NEMO_FFN_DIM, sizeof(float));
+    s->layer_tmp = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->att_q = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->att_k_cur = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->att_v_cur = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->att_ctx = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->att_scores = nemo_alloc((size_t)s->scratch_scores, sizeof(float));
+    s->conv_pw = nemo_alloc((size_t)chunk * 2 * NEMO_D_MODEL, sizeof(float));
+    s->conv_glu_tmp = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->conv_dw = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->conv_norm = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    if (!s->layer_norm || !s->layer_ff || !s->layer_tmp ||
+        !s->att_q || !s->att_k_cur || !s->att_v_cur || !s->att_ctx || !s->att_scores ||
+        !s->conv_pw || !s->conv_glu_tmp || !s->conv_dw || !s->conv_norm) {
+        return -1;
     }
     return 0;
 }
@@ -278,19 +328,17 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
     (void)ctx;
     int cache_len = s->att_len[layer];
     int total_k = cache_len + t;
-    float *q = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *k_cur = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *v_cur = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *ctxv = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *scores = nemo_alloc((size_t)total_k, sizeof(float));
+    if (t > s->scratch_t || total_k > s->scratch_scores) return -1;
+    float *q = s->att_q;
+    float *k_cur = s->att_k_cur;
+    float *v_cur = s->att_v_cur;
+    float *ctxv = s->att_ctx;
+    float *scores = s->att_scores;
     const float *p = s->rel_pos[layer];
-    if (!q || !k_cur || !v_cur || !ctxv || !scores || !p) {
-        free(q); free(k_cur); free(v_cur); free(ctxv); free(scores);
-        return -1;
-    }
-    nemo_linear_nobias(q, x, l->att_q_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
-    nemo_linear_nobias(k_cur, x, l->att_k_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
-    nemo_linear_nobias(v_cur, x, l->att_v_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
+    if (!q || !k_cur || !v_cur || !ctxv || !scores || !p) return -1;
+    nemo_linear3_nobias(q, k_cur, v_cur, x,
+                        l->att_q_w, l->att_k_w, l->att_v_w,
+                        t, NEMO_D_MODEL, NEMO_D_MODEL);
 
     const float scale = 1.0f / sqrtf((float)NEMO_HEAD_DIM);
     for (int qi = 0; qi < t; qi++) {
@@ -330,20 +378,17 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
     cache_append(s->att_k[layer], &next_len, s->att_cap, k_cur, t, NEMO_D_MODEL);
     cache_append(s->att_v[layer], &next_v_len, s->att_cap, v_cur, t, NEMO_D_MODEL);
     s->att_len[layer] = next_len;
-    free(q); free(k_cur); free(v_cur); free(ctxv); free(scores);
     return 0;
 }
 
 static int conformer_conv_stream(const nemo_enc_layer_t *l, enc_stream_state_t *s,
                                  int layer, const float *x, int t, float *out) {
-    float *pw = nemo_alloc((size_t)t * 2 * NEMO_D_MODEL, sizeof(float));
-    float *glu = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *dw = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *norm = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    if (!pw || !glu || !dw || !norm) {
-        free(pw); free(glu); free(dw); free(norm);
-        return -1;
-    }
+    if (t > s->scratch_t) return -1;
+    float *pw = s->conv_pw;
+    float *glu = s->conv_glu_tmp;
+    float *dw = s->conv_dw;
+    float *norm = s->conv_norm;
+    if (!pw || !glu || !dw || !norm) return -1;
     nemo_linear_nobias(pw, x, l->conv_pw1_w, t, NEMO_D_MODEL, 2 * NEMO_D_MODEL);
     for (int i = 0; i < t; i++) {
         for (int d = 0; d < NEMO_D_MODEL; d++) {
@@ -373,16 +418,16 @@ static int conformer_conv_stream(const nemo_enc_layer_t *l, enc_stream_state_t *
     nemo_layer_norm(norm, dw, l->conv_norm_w, l->conv_norm_b, t, NEMO_D_MODEL, LN_EPS);
     nemo_swish(norm, t * NEMO_D_MODEL);
     nemo_linear_nobias(out, norm, l->conv_pw2_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
-    free(pw); free(glu); free(dw); free(norm);
     return 0;
 }
 
 static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
                                   enc_stream_state_t *s, int layer, float *x, int t) {
-    float *norm = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    float *ff = nemo_alloc((size_t)t * NEMO_FFN_DIM, sizeof(float));
-    float *tmp = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    if (!norm || !ff || !tmp) { free(norm); free(ff); free(tmp); return -1; }
+    if (t > s->scratch_t) return -1;
+    float *norm = s->layer_norm;
+    float *ff = s->layer_ff;
+    float *tmp = s->layer_tmp;
+    if (!norm || !ff || !tmp) return -1;
 
     nemo_layer_norm(norm, x, l->norm_ff1_w, l->norm_ff1_b, t, NEMO_D_MODEL, LN_EPS);
     nemo_linear_nobias(ff, norm, l->ff1_linear1_w, t, NEMO_D_MODEL, NEMO_FFN_DIM);
@@ -391,11 +436,11 @@ static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
     nemo_vec_axpy_inplace(x, tmp, 0.5f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(norm, x, l->norm_att_w, l->norm_att_b, t, NEMO_D_MODEL, LN_EPS);
-    if (rel_attention_stream(ctx, l, s, layer, norm, t, tmp) != 0) { free(norm); free(ff); free(tmp); return -1; }
+    if (rel_attention_stream(ctx, l, s, layer, norm, t, tmp) != 0) return -1;
     nemo_vec_axpy_inplace(x, tmp, 1.0f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(norm, x, l->norm_conv_w, l->norm_conv_b, t, NEMO_D_MODEL, LN_EPS);
-    if (conformer_conv_stream(l, s, layer, norm, t, tmp) != 0) { free(norm); free(ff); free(tmp); return -1; }
+    if (conformer_conv_stream(l, s, layer, norm, t, tmp) != 0) return -1;
     nemo_vec_axpy_inplace(x, tmp, 1.0f, t * NEMO_D_MODEL);
 
     nemo_layer_norm(norm, x, l->norm_ff2_w, l->norm_ff2_b, t, NEMO_D_MODEL, LN_EPS);
@@ -406,7 +451,6 @@ static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
 
     nemo_layer_norm(tmp, x, l->norm_out_w, l->norm_out_b, t, NEMO_D_MODEL, LN_EPS);
     memcpy(x, tmp, (size_t)t * NEMO_D_MODEL * sizeof(float));
-    free(norm); free(ff); free(tmp);
     return 0;
 }
 
@@ -415,16 +459,9 @@ static int apply_prompt(const nemo_ctx_t *ctx, float *x, int t) {
     float *h = nemo_alloc((size_t)t * 2 * NEMO_D_MODEL, sizeof(float));
     float *y = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
     if (!h || !y) { free(h); free(y); return -1; }
-    for (int row = 0; row < t; row++) {
-        const float *xr = x + (size_t)row * NEMO_D_MODEL;
-        float *hr = h + (size_t)row * 2 * NEMO_D_MODEL;
-        for (int o = 0; o < 2 * NEMO_D_MODEL; o++) {
-            const float *wr = e->prompt0_w + (size_t)o * (NEMO_D_MODEL + NEMO_NUM_PROMPTS);
-            float sum = e->prompt0_b[o] + wr[NEMO_D_MODEL + ctx->prompt_id];
-            sum += nemo_dot_f32(xr, wr, NEMO_D_MODEL);
-            hr[o] = sum > 0.0f ? sum : 0.0f;
-        }
-    }
+    nemo_prompt_linear_relu(h, x, e->prompt0_w, e->prompt0_b,
+                            t, NEMO_D_MODEL, NEMO_NUM_PROMPTS, ctx->prompt_id,
+                            2 * NEMO_D_MODEL);
     nemo_linear(y, h, e->prompt2_w, e->prompt2_b, t, 2 * NEMO_D_MODEL, NEMO_D_MODEL);
     memcpy(x, y, (size_t)t * NEMO_D_MODEL * sizeof(float));
     free(h); free(y);
@@ -436,13 +473,16 @@ nemo_encoder_stream_t *nemo_encoder_stream_create(nemo_ctx_t *ctx) {
     if (!s) return NULL;
     preenc_stream_init(&s->pre);
     int att_cap = ctx->att_left >= 0 ? ctx->att_left : 56;
+    s->chunk = ctx->att_right + 1;
+    if (s->chunk < 1) s->chunk = 1;
     if (enc_stream_init(&s->enc, att_cap, CONV_LEFT) != 0) {
         nemo_encoder_stream_free(s);
         return NULL;
     }
-
-    s->chunk = ctx->att_right + 1;
-    if (s->chunk < 1) s->chunk = 1;
+    if (enc_stream_init_scratch(&s->enc, s->chunk) != 0) {
+        nemo_encoder_stream_free(s);
+        return NULL;
+    }
     if (enc_stream_build_rel_pos(ctx, &s->enc, s->chunk) != 0) {
         nemo_encoder_stream_free(s);
         return NULL;

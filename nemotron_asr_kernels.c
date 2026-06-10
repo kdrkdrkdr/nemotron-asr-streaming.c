@@ -2,10 +2,286 @@
 #include "nemotron_asr_kernels_impl.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#else
+#include <unistd.h>
+#endif
+#ifdef USE_BLAS
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#endif
+
+#define NEMO_MAX_THREADS 16
+#define NEMO_PARALLEL_WORK_MIN 262144
+#define NEMO_BLAS_ROWS_MIN 16
+
+typedef void (*nemo_parallel_fn_t)(int tid, int n_threads, void *arg);
+
+static struct {
+    pthread_t threads[NEMO_MAX_THREADS - 1];
+    int tids[NEMO_MAX_THREADS - 1];
+    int n_threads;
+    int shutdown;
+
+    nemo_parallel_fn_t fn;
+    void *arg;
+    int generation;
+
+    pthread_mutex_t mutex;
+    pthread_cond_t cond_work;
+    pthread_cond_t cond_done;
+    int n_done;
+} g_tp = {
+    .n_threads = 1,
+    .shutdown = 0,
+    .generation = 0,
+    .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .cond_work = PTHREAD_COND_INITIALIZER,
+    .cond_done = PTHREAD_COND_INITIALIZER,
+};
+
+static void *nemo_worker_loop(void *arg) {
+    int tid = *(int *)arg;
+    int my_gen = 0;
+
+    for (;;) {
+        pthread_mutex_lock(&g_tp.mutex);
+        while (g_tp.generation == my_gen && !g_tp.shutdown) {
+            pthread_cond_wait(&g_tp.cond_work, &g_tp.mutex);
+        }
+        if (g_tp.shutdown) {
+            pthread_mutex_unlock(&g_tp.mutex);
+            return NULL;
+        }
+        my_gen = g_tp.generation;
+        nemo_parallel_fn_t fn = g_tp.fn;
+        void *a = g_tp.arg;
+        int nt = g_tp.n_threads;
+        pthread_mutex_unlock(&g_tp.mutex);
+
+        fn(tid, nt, a);
+
+        pthread_mutex_lock(&g_tp.mutex);
+        if (++g_tp.n_done >= g_tp.n_threads - 1) {
+            pthread_cond_signal(&g_tp.cond_done);
+        }
+        pthread_mutex_unlock(&g_tp.mutex);
+    }
+}
+
+static void nemo_parallel_for(nemo_parallel_fn_t fn, void *arg) {
+    if (g_tp.n_threads <= 1) {
+        fn(0, 1, arg);
+        return;
+    }
+
+    pthread_mutex_lock(&g_tp.mutex);
+    g_tp.fn = fn;
+    g_tp.arg = arg;
+    g_tp.n_done = 0;
+    g_tp.generation++;
+    pthread_cond_broadcast(&g_tp.cond_work);
+    pthread_mutex_unlock(&g_tp.mutex);
+
+    fn(0, g_tp.n_threads, arg);
+
+    pthread_mutex_lock(&g_tp.mutex);
+    while (g_tp.n_done < g_tp.n_threads - 1) {
+        pthread_cond_wait(&g_tp.cond_done, &g_tp.mutex);
+    }
+    pthread_mutex_unlock(&g_tp.mutex);
+}
+
+int nemo_get_num_cpus(void) {
+#ifdef __APPLE__
+    int n = 0;
+    size_t len = sizeof(n);
+    if (sysctlbyname("hw.ncpu", &n, &len, NULL, 0) != 0) return 1;
+    return n > 0 ? n : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+#endif
+}
+
+void nemo_set_threads(int n_threads) {
+    if (n_threads < 1) n_threads = 1;
+    if (n_threads > NEMO_MAX_THREADS) n_threads = NEMO_MAX_THREADS;
+    if (n_threads == g_tp.n_threads) return;
+
+    if (g_tp.n_threads > 1) {
+        pthread_mutex_lock(&g_tp.mutex);
+        g_tp.shutdown = 1;
+        pthread_cond_broadcast(&g_tp.cond_work);
+        pthread_mutex_unlock(&g_tp.mutex);
+        for (int i = 0; i < g_tp.n_threads - 1; i++) {
+            pthread_join(g_tp.threads[i], NULL);
+        }
+        pthread_mutex_lock(&g_tp.mutex);
+        g_tp.shutdown = 0;
+        g_tp.generation = 0;
+        g_tp.fn = NULL;
+        g_tp.arg = NULL;
+        g_tp.n_done = 0;
+        pthread_mutex_unlock(&g_tp.mutex);
+    }
+
+    g_tp.n_threads = n_threads;
+    if (n_threads <= 1) return;
+
+    for (int i = 0; i < n_threads - 1; i++) {
+        g_tp.tids[i] = i + 1;
+        if (pthread_create(&g_tp.threads[i], NULL, nemo_worker_loop, &g_tp.tids[i]) != 0) {
+            g_tp.n_threads = i + 1;
+            return;
+        }
+    }
+}
+
+int nemo_get_threads(void) {
+    return g_tp.n_threads;
+}
+
+typedef struct {
+    float *y;
+    const float *x;
+    const float *w;
+    const float *b;
+    int rows;
+    int in_dim;
+    int out_dim;
+} nemo_linear_task_t;
+
+static void nemo_linear_worker(int tid, int n_threads, void *arg) {
+    nemo_linear_task_t *t = (nemo_linear_task_t *)arg;
+    int total = t->rows * t->out_dim;
+    int start = (total * tid) / n_threads;
+    int end = (total * (tid + 1)) / n_threads;
+    for (int idx = start; idx < end; idx++) {
+        int r = idx / t->out_dim;
+        int o = idx - r * t->out_dim;
+        const float *xr = t->x + (size_t)r * t->in_dim;
+        const float *wr = t->w + (size_t)o * t->in_dim;
+        t->y[(size_t)r * t->out_dim + o] =
+            nemo_dot_f32_impl(xr, wr, t->in_dim) + (t->b ? t->b[o] : 0.0f);
+    }
+}
+
+typedef struct {
+    float *y0;
+    float *y1;
+    float *y2;
+    const float *x;
+    const float *w0;
+    const float *w1;
+    const float *w2;
+    int rows;
+    int in_dim;
+    int out_dim;
+} nemo_linear3_task_t;
+
+static void nemo_linear3_worker(int tid, int n_threads, void *arg) {
+    nemo_linear3_task_t *t = (nemo_linear3_task_t *)arg;
+    int total = t->rows * t->out_dim;
+    int start = (total * tid) / n_threads;
+    int end = (total * (tid + 1)) / n_threads;
+    for (int idx = start; idx < end; idx++) {
+        int r = idx / t->out_dim;
+        int o = idx - r * t->out_dim;
+        const float *xr = t->x + (size_t)r * t->in_dim;
+        t->y0[(size_t)r * t->out_dim + o] =
+            nemo_dot_f32_impl(xr, t->w0 + (size_t)o * t->in_dim, t->in_dim);
+        t->y1[(size_t)r * t->out_dim + o] =
+            nemo_dot_f32_impl(xr, t->w1 + (size_t)o * t->in_dim, t->in_dim);
+        t->y2[(size_t)r * t->out_dim + o] =
+            nemo_dot_f32_impl(xr, t->w2 + (size_t)o * t->in_dim, t->in_dim);
+    }
+}
+
+typedef struct {
+    float *y;
+    const float *x;
+    const float *w;
+    const float *b;
+    int in_dim;
+    int out_dim;
+} nemo_matvec_task_t;
+
+static void nemo_matvec_worker(int tid, int n_threads, void *arg) {
+    nemo_matvec_task_t *t = (nemo_matvec_task_t *)arg;
+    int start = (t->out_dim * tid) / n_threads;
+    int end = (t->out_dim * (tid + 1)) / n_threads;
+    for (int o = start; o < end; o++) {
+        const float *wr = t->w + (size_t)o * t->in_dim;
+        t->y[o] = nemo_dot_f32_impl(t->x, wr, t->in_dim) + (t->b ? t->b[o] : 0.0f);
+    }
+}
+
+typedef struct {
+    const float *x;
+    const float *w;
+    const float *b;
+    int in_dim;
+    int out_dim;
+    int best[NEMO_MAX_THREADS];
+    float best_val[NEMO_MAX_THREADS];
+} nemo_argmax_task_t;
+
+static void nemo_argmax_worker(int tid, int n_threads, void *arg) {
+    nemo_argmax_task_t *t = (nemo_argmax_task_t *)arg;
+    int start = (t->out_dim * tid) / n_threads;
+    int end = (t->out_dim * (tid + 1)) / n_threads;
+    int best = start;
+    float best_val = -3.4028234663852886e38f;
+    for (int o = start; o < end; o++) {
+        const float *wr = t->w + (size_t)o * t->in_dim;
+        float v = nemo_dot_f32_impl(t->x, wr, t->in_dim) + (t->b ? t->b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    t->best[tid] = best;
+    t->best_val[tid] = best_val;
+}
+
+typedef struct {
+    float *y;
+    const float *x;
+    const float *w;
+    const float *b;
+    int rows;
+    int in_dim;
+    int prompt_dim;
+    int prompt_id;
+    int out_dim;
+} nemo_prompt_task_t;
+
+static void nemo_prompt_worker(int tid, int n_threads, void *arg) {
+    nemo_prompt_task_t *t = (nemo_prompt_task_t *)arg;
+    int total = t->rows * t->out_dim;
+    int stride = t->in_dim + t->prompt_dim;
+    int start = (total * tid) / n_threads;
+    int end = (total * (tid + 1)) / n_threads;
+    for (int idx = start; idx < end; idx++) {
+        int r = idx / t->out_dim;
+        int o = idx - r * t->out_dim;
+        const float *xr = t->x + (size_t)r * t->in_dim;
+        const float *wr = t->w + (size_t)o * stride;
+        float v = (t->b ? t->b[o] : 0.0f) + wr[t->in_dim + t->prompt_id];
+        v += nemo_dot_f32_impl(xr, wr, t->in_dim);
+        t->y[(size_t)r * t->out_dim + o] = v > 0.0f ? v : 0.0f;
+    }
+}
 
 float *nemo_alloc(size_t count, size_t elem) {
     if (count == 0 || elem == 0 || count > (SIZE_MAX / elem)) return NULL;
@@ -24,6 +300,27 @@ double nemo_time_ms(void) {
 
 void nemo_linear(float *y, const float *x, const float *w, const float *b,
                  int rows, int in_dim, int out_dim) {
+    long long work = (long long)rows * (long long)in_dim * (long long)out_dim;
+#ifdef USE_BLAS
+    if (rows >= NEMO_BLAS_ROWS_MIN && work >= NEMO_PARALLEL_WORK_MIN) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    rows, out_dim, in_dim,
+                    1.0f, x, in_dim, w, in_dim,
+                    0.0f, y, out_dim);
+        if (b) {
+            for (int r = 0; r < rows; r++) {
+                float *yr = y + (size_t)r * out_dim;
+                for (int o = 0; o < out_dim; o++) yr[o] += b[o];
+            }
+        }
+        return;
+    }
+#endif
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_linear_task_t task = {y, x, w, b, rows, in_dim, out_dim};
+        nemo_parallel_for(nemo_linear_worker, &task);
+        return;
+    }
     for (int r = 0; r < rows; r++) {
         const float *xr = x + (size_t)r * in_dim;
         float *yr = y + (size_t)r * out_dim;
@@ -34,6 +331,33 @@ void nemo_linear(float *y, const float *x, const float *w, const float *b,
 void nemo_linear_nobias(float *y, const float *x, const float *w,
                         int rows, int in_dim, int out_dim) {
     nemo_linear(y, x, w, NULL, rows, in_dim, out_dim);
+}
+
+void nemo_linear3_nobias(float *y0, float *y1, float *y2, const float *x,
+                         const float *w0, const float *w1, const float *w2,
+                         int rows, int in_dim, int out_dim) {
+    long long work = (long long)rows * (long long)in_dim * (long long)out_dim * 3LL;
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_linear3_task_t task = {y0, y1, y2, x, w0, w1, w2, rows, in_dim, out_dim};
+        nemo_parallel_for(nemo_linear3_worker, &task);
+        return;
+    }
+    nemo_linear_nobias(y0, x, w0, rows, in_dim, out_dim);
+    nemo_linear_nobias(y1, x, w1, rows, in_dim, out_dim);
+    nemo_linear_nobias(y2, x, w2, rows, in_dim, out_dim);
+}
+
+void nemo_prompt_linear_relu(float *y, const float *x, const float *w, const float *b,
+                             int rows, int in_dim, int prompt_dim, int prompt_id,
+                             int out_dim) {
+    if (prompt_id < 0 || prompt_id >= prompt_dim) prompt_id = prompt_dim - 1;
+    long long work = (long long)rows * (long long)in_dim * (long long)out_dim;
+    nemo_prompt_task_t task = {y, x, w, b, rows, in_dim, prompt_dim, prompt_id, out_dim};
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_parallel_for(nemo_prompt_worker, &task);
+        return;
+    }
+    nemo_prompt_worker(0, 1, &task);
 }
 
 static int conv_out_len(int n, int left, int right, int k, int stride) {
@@ -109,11 +433,38 @@ float nemo_attention_score_f32(const float *q, const float *bias_u, const float 
 
 void nemo_matvec_f32(float *y, const float *x, const float *w, const float *b,
                      int in_dim, int out_dim) {
+    long long work = (long long)in_dim * (long long)out_dim;
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_matvec_task_t task = {y, x, w, b, in_dim, out_dim};
+        nemo_parallel_for(nemo_matvec_worker, &task);
+        return;
+    }
     nemo_matvec_f32_impl(y, x, w, b, in_dim, out_dim);
 }
 
 int nemo_argmax_matvec_f32(const float *x, const float *w, const float *b,
                            int in_dim, int out_dim, float *best_val_out) {
+    long long work = (long long)in_dim * (long long)out_dim;
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_argmax_task_t task;
+        memset(&task, 0, sizeof(task));
+        task.x = x;
+        task.w = w;
+        task.b = b;
+        task.in_dim = in_dim;
+        task.out_dim = out_dim;
+        nemo_parallel_for(nemo_argmax_worker, &task);
+        int best = 0;
+        float best_val = -3.4028234663852886e38f;
+        for (int i = 0; i < g_tp.n_threads; i++) {
+            if (task.best_val[i] > best_val) {
+                best_val = task.best_val[i];
+                best = task.best[i];
+            }
+        }
+        if (best_val_out) *best_val_out = best_val;
+        return best;
+    }
     return nemo_argmax_matvec_f32_impl(x, w, b, in_dim, out_dim, best_val_out);
 }
 

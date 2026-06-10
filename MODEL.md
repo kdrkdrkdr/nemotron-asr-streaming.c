@@ -81,6 +81,23 @@ Current SIMD backends should therefore prioritize:
 - `nemo_preconv_emit_f32` for streaming causal subsampling conv stages
 - `nemo_fft512_power_f32` plus `nemo_dot_f32` for the mel front-end
 
+CPU engine optimizations now mirror the useful qwen-asr patterns that apply to
+Nemotron's graph:
+
+- a persistent worker pool controlled by `nemo_set_threads`
+- output-row parallelism for large fp32 `nemo_linear` calls
+- threaded `nemo_matvec_f32` and `nemo_argmax_matvec_f32`
+- fused `nemo_linear3_nobias` for encoder Q/K/V projection
+- threaded `nemo_prompt_linear_relu` for language prompt projection
+- persistent per-stream encoder scratch buffers to avoid layer-local malloc/free
+- optional BLAS dispatch for larger dense batches, while tiny streaming chunks
+  stay on the native kernels
+
+The fused Q/K/V path matters because streaming chunks are small. Running three
+separate threaded linear calls pays thread-dispatch overhead three times per
+layer. Fusing keeps the same math while scheduling one pass over
+`rows * d_model` output positions.
+
 Qwen-only kernels that are not used by the Nemotron graph should not be carried
 over just for symmetry.
 

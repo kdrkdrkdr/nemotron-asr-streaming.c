@@ -300,6 +300,7 @@ static void usage(const char *argv0) {
             "  -m <file>          Converted Nemotron model bin\n"
             "  --list-devices     List macOS input devices and exit\n"
             "  --device X         Input device index, AudioDeviceID, UID, or exact name\n"
+            "  -t <n>             Number of worker threads (default: all CPUs, max 16)\n"
             "  -l <lang>          Language prompt, e.g. en-US, ko-KR, auto (default auto)\n"
             "  --att-right N      Right context in 80 ms encoder frames: 0,1,3,6,13 (default 3)\n"
             "  --push-frames N    Microphone push size in 80 ms encoder-frame units (default att_right+1)\n"
@@ -597,6 +598,7 @@ int main(int argc, char **argv) {
     int trace = 1;
     int meter = 0;
     int list_devices = 0;
+    int n_threads = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -605,6 +607,8 @@ int main(int argc, char **argv) {
             list_devices = 1;
         } else if ((strcmp(argv[i], "--device") == 0 || strcmp(argv[i], "-D") == 0) && i + 1 < argc) {
             device_arg = argv[++i];
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            if (parse_int(argv[++i], &n_threads) != 0) { usage(argv[0]); return 2; }
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
             lang = argv[++i];
         } else if (strcmp(argv[i], "--att-right") == 0 && i + 1 < argc) {
@@ -643,6 +647,12 @@ int main(int argc, char **argv) {
         usage(argv[0]);
         return 2;
     }
+    if (n_threads < 0) {
+        fprintf(stderr, "nemotron_mic: -t must be >= 1\n");
+        return 2;
+    }
+    if (n_threads == 0) n_threads = nemo_get_num_cpus();
+    nemo_set_threads(n_threads);
     if (push_frames <= 0) push_frames = att_right + 1;
     if (push_frames < 1) {
         fprintf(stderr, "nemotron_mic: --push-frames must be >= 1\n");
