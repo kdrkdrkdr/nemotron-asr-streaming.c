@@ -89,7 +89,9 @@ Nemotron's graph:
 - threaded `nemo_matvec_f32` and `nemo_argmax_matvec_f32`
 - fused `nemo_linear3_nobias` for encoder Q/K/V projection
 - threaded `nemo_prompt_linear_relu` for language prompt projection
-- persistent per-stream encoder scratch buffers to avoid layer-local malloc/free
+- fused `nemo_lstm_gates_f32` for RNN-T prediction-network gate projection
+- persistent per-stream encoder, prompt, and RNN-T projection scratch buffers
+  to avoid chunk-local malloc/free
 - optional BLAS dispatch for larger dense batches, while tiny streaming chunks
   stay on the native kernels
 
@@ -97,6 +99,10 @@ The fused Q/K/V path matters because streaming chunks are small. Running three
 separate threaded linear calls pays thread-dispatch overhead three times per
 layer. Fusing keeps the same math while scheduling one pass over
 `rows * d_model` output positions.
+
+The LSTM gate fusion applies the same idea to the prediction network: the
+input and recurrent projections are accumulated in one output-row pass instead
+of launching two matvecs and a separate residual add for every emitted token.
 
 Qwen-only kernels that are not used by the Nemotron graph should not be carried
 over just for symmetry.

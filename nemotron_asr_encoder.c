@@ -34,6 +34,7 @@ typedef struct {
     float *conv_glu_tmp;
     float *conv_dw;
     float *conv_norm;
+    float *chunk_buf;
 } enc_stream_state_t;
 
 typedef struct {
@@ -84,6 +85,7 @@ static void enc_stream_free(enc_stream_state_t *s) {
     free(s->conv_glu_tmp);
     free(s->conv_dw);
     free(s->conv_norm);
+    free(s->chunk_buf);
     memset(s, 0, sizeof(*s));
 }
 
@@ -119,9 +121,11 @@ static int enc_stream_init_scratch(enc_stream_state_t *s, int chunk) {
     s->conv_glu_tmp = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->conv_dw = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->conv_norm = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
+    s->chunk_buf = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     if (!s->layer_norm || !s->layer_ff || !s->layer_tmp ||
         !s->att_q || !s->att_k_cur || !s->att_v_cur || !s->att_ctx || !s->att_scores ||
-        !s->conv_pw || !s->conv_glu_tmp || !s->conv_dw || !s->conv_norm) {
+        !s->conv_pw || !s->conv_glu_tmp || !s->conv_dw || !s->conv_norm ||
+        !s->chunk_buf) {
         return -1;
     }
     return 0;
@@ -454,17 +458,17 @@ static int conformer_layer_stream(nemo_ctx_t *ctx, const nemo_enc_layer_t *l,
     return 0;
 }
 
-static int apply_prompt(const nemo_ctx_t *ctx, float *x, int t) {
+static int apply_prompt(const nemo_ctx_t *ctx, enc_stream_state_t *s, float *x, int t) {
     const nemo_encoder_t *e = &ctx->model.encoder;
-    float *h = nemo_alloc((size_t)t * 2 * NEMO_D_MODEL, sizeof(float));
-    float *y = nemo_alloc((size_t)t * NEMO_D_MODEL, sizeof(float));
-    if (!h || !y) { free(h); free(y); return -1; }
+    if (t > s->scratch_t) return -1;
+    float *h = s->layer_ff;
+    float *y = s->layer_tmp;
+    if (!h || !y) return -1;
     nemo_prompt_linear_relu(h, x, e->prompt0_w, e->prompt0_b,
                             t, NEMO_D_MODEL, NEMO_NUM_PROMPTS, ctx->prompt_id,
                             2 * NEMO_D_MODEL);
     nemo_linear(y, h, e->prompt2_w, e->prompt2_b, t, 2 * NEMO_D_MODEL, NEMO_D_MODEL);
     memcpy(x, y, (size_t)t * NEMO_D_MODEL * sizeof(float));
-    free(h); free(y);
     return 0;
 }
 
@@ -537,22 +541,17 @@ int nemo_encoder_stream_accept(nemo_ctx_t *ctx, nemo_encoder_stream_t *s,
 
         while (s->pending_len >= s->chunk || (pass_final && s->pending_len > 0)) {
             int n = s->pending_len < s->chunk ? s->pending_len : s->chunk;
-            float *cur = nemo_alloc((size_t)n * NEMO_D_MODEL, sizeof(float));
-            if (!cur) {
-                return -1;
-            }
+            float *cur = s->enc.chunk_buf;
+            if (!cur || n > s->enc.scratch_t) return -1;
             memcpy(cur, s->pending, (size_t)n * NEMO_D_MODEL * sizeof(float));
             for (int i = 0; i < NEMO_ENC_LAYERS; i++) {
                 if (conformer_layer_stream(ctx, &ctx->model.encoder.layers[i], &s->enc, i, cur, n) != 0) {
-                    free(cur);
                     return -1;
                 }
             }
-            if (apply_prompt(ctx, cur, n) != 0 || cb(user, cur, n) != 0) {
-                free(cur);
+            if (apply_prompt(ctx, &s->enc, cur, n) != 0 || cb(user, cur, n) != 0) {
                 return -1;
             }
-            free(cur);
             s->pending_len -= n;
             if (s->pending_len > 0) {
                 memmove(s->pending, s->pending + (size_t)n * NEMO_D_MODEL,

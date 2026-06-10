@@ -266,6 +266,18 @@ typedef struct {
     int out_dim;
 } nemo_prompt_task_t;
 
+typedef struct {
+    float *y;
+    const float *x;
+    const float *h;
+    const float *w_ih;
+    const float *w_hh;
+    const float *b_ih;
+    const float *b_hh;
+    int dim;
+    int out_dim;
+} nemo_lstm_gates_task_t;
+
 static void nemo_prompt_worker(int tid, int n_threads, void *arg) {
     nemo_prompt_task_t *t = (nemo_prompt_task_t *)arg;
     int total = t->rows * t->out_dim;
@@ -280,6 +292,20 @@ static void nemo_prompt_worker(int tid, int n_threads, void *arg) {
         float v = (t->b ? t->b[o] : 0.0f) + wr[t->in_dim + t->prompt_id];
         v += nemo_dot_f32_impl(xr, wr, t->in_dim);
         t->y[(size_t)r * t->out_dim + o] = v > 0.0f ? v : 0.0f;
+    }
+}
+
+static void nemo_lstm_gates_worker(int tid, int n_threads, void *arg) {
+    nemo_lstm_gates_task_t *t = (nemo_lstm_gates_task_t *)arg;
+    int start = (t->out_dim * tid) / n_threads;
+    int end = (t->out_dim * (tid + 1)) / n_threads;
+    for (int o = start; o < end; o++) {
+        float v = 0.0f;
+        if (t->b_ih) v += t->b_ih[o];
+        if (t->b_hh) v += t->b_hh[o];
+        v += nemo_dot_f32_impl(t->x, t->w_ih + (size_t)o * t->dim, t->dim);
+        v += nemo_dot_f32_impl(t->h, t->w_hh + (size_t)o * t->dim, t->dim);
+        t->y[o] = v;
     }
 }
 
@@ -358,6 +384,19 @@ void nemo_prompt_linear_relu(float *y, const float *x, const float *w, const flo
         return;
     }
     nemo_prompt_worker(0, 1, &task);
+}
+
+void nemo_lstm_gates_f32(float *y, const float *x, const float *h,
+                         const float *w_ih, const float *w_hh,
+                         const float *b_ih, const float *b_hh,
+                         int dim, int out_dim) {
+    long long work = (long long)dim * (long long)out_dim * 2LL;
+    nemo_lstm_gates_task_t task = {y, x, h, w_ih, w_hh, b_ih, b_hh, dim, out_dim};
+    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
+        nemo_parallel_for(nemo_lstm_gates_worker, &task);
+        return;
+    }
+    nemo_lstm_gates_worker(0, 1, &task);
 }
 
 static int conv_out_len(int n, int left, int right, int k, int stride) {

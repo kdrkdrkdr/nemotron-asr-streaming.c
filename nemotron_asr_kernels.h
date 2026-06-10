@@ -44,6 +44,10 @@ void nemo_linear3_nobias(float *y0, float *y1, float *y2, const float *x,
 void nemo_prompt_linear_relu(float *y, const float *x, const float *w, const float *b,
                              int rows, int in_dim, int prompt_dim, int prompt_id,
                              int out_dim);
+void nemo_lstm_gates_f32(float *y, const float *x, const float *h,
+                         const float *w_ih, const float *w_hh,
+                         const float *b_ih, const float *b_hh,
+                         int dim, int out_dim);
 void nemo_layer_norm(float *y, const float *x, const float *w, const float *b,
                      int rows, int dim, float eps);
 void nemo_softmax(float *x, int n);

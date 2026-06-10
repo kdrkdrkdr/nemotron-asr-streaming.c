@@ -64,8 +64,8 @@ Conversion requires Python with `torch` and `yaml`. Inference does not.
   fp32 linear/matvec/argmax operations.
 - **Fused QKV projection**: encoder attention computes Q/K/V in one scheduled
   projection pass to reduce dispatch overhead on small streaming chunks.
-- **Low-allocation streaming loop**: encoder layer scratch buffers are reused
-  across chunks.
+- **Low-allocation streaming loop**: encoder, prompt, and RNN-T projection
+  scratch buffers are reused across chunks.
 - **Optional BLAS build**: `make blas` can route larger dense batches through
   Accelerate/OpenBLAS while keeping the default build dependency-free.
 - **Live testing**: macOS microphone CLI with input device selection and a
@@ -260,6 +260,7 @@ The public kernel surface covers the current hot path:
 - `nemo_fft512_power_f32`
 - `nemo_linear3_nobias` for fused encoder Q/K/V projection
 - `nemo_prompt_linear_relu` for language prompt projection
+- `nemo_lstm_gates_f32` for fused RNN-T prediction LSTM gates
 
 Backends:
 
@@ -287,9 +288,9 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | build/options | inference | realtime |
 |---------------|-----------|----------|
 | native, `-t 1` | 9.65 s | 1.14x |
-| native, `-t 8` | 3.62 s | 3.04x |
+| native, `-t 8` | 3.64 s | 3.02x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
-| generic, `-t 8` | 4.71 s | 2.34x |
+| generic, `-t 8` | 4.73 s | 2.33x |
 
 ## Model Facts
 
