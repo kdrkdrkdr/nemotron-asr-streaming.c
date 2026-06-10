@@ -22,6 +22,9 @@ mmap-friendly `.bin` file.
   the RNN-T vocabulary from the original `.nemo` archive into the C runtime
   binary format.
 
+This project focuses on dependency-free CPU inference. There is no CUDA, MPS,
+PyTorch, ONNX Runtime, or NeMo dependency in the inference path.
+
 ## Quick Start
 
 ```bash
@@ -44,6 +47,10 @@ make
 
 Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not.
 
+For normal use, prefer the BF16 linear file. It keeps normalization, bias,
+convolution, mel, and embedding tensors in float32, but stores dense linear and
+classifier weights as BF16 so the runtime can skip a large float32 expansion.
+
 ## Features
 
 - **Pure C inference**: C11 runtime with libc/libm/pthread only by default.
@@ -61,8 +68,8 @@ Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not
   encoder chunks.
 - **Language prompt control**: supports prompt IDs such as `auto`, `en-US`, and
   `ko-KR`.
-- **Native kernels**: generic C fallback plus NEON and AVX dispatch for hot
-  math paths.
+- **Native kernels**: generic C fallback plus NEON, AVX2/FMA, and AVX512F+BW
+  dispatch for hot math paths.
 - **Threaded dense path**: qwen-asr-style persistent worker pool for large
   fp32 linear/matvec/argmax operations.
 - **Fused QKV projection**: encoder attention computes Q/K/V in one scheduled
@@ -139,6 +146,19 @@ Useful options:
 
 The WAV path loads the file, resamples to 16 kHz mono if needed, and then feeds
 the audio through the same chunked streaming graph used by live input.
+
+## Which Mode To Use
+
+- **Quick file test**: use `./nemotron_asr -i audio.wav` with the default
+  `--att-right 3`.
+- **Lowest interactive latency**: use the microphone tool with `--att-right 0`
+  or `--att-right 1`. This emits smaller encoder chunks.
+- **Balanced live transcription**: use `--att-right 3`, the model's default
+  320 ms chunk family.
+- **More right context**: use `--att-right 6` or `--att-right 13`. This adds
+  latency but can improve difficult audio.
+- **CPU throughput testing**: use the BF16 linear model file and set `-t N` to
+  the number of useful CPU cores.
 
 ## Live Microphone
 
@@ -282,13 +302,16 @@ The public kernel surface covers the current hot path:
 
 Backends:
 
-- `nemotron_asr_kernels_generic.c`: scalar C fallback.
-- `nemotron_asr_kernels_neon.c`: ARM NEON implementations for dense math,
-  BF16 weight dot/matvec, attention score, residual axpy, and pointwise
-  streaming preconv.
-- `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for dense math,
-  BF16 weight dot/matvec wrappers, attention score, residual axpy, and
+- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32 and BF16 dense
+  paths.
+- `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
+  BF16 row dot, two-row BF16 matvec, attention score, residual axpy, and
   pointwise streaming preconv.
+- `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
+  BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
+  axpy, and pointwise streaming preconv.
+- `nemotron_asr_kernels_avx.c` on AVX512F+BW: 16-lane BF16 conversion plus
+  four-output-row BF16 matvec/argmax range.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -301,8 +324,11 @@ Threading:
   split across output rows.
 - Small operations stay single-threaded to avoid scheduling overhead.
 - BF16 linear weights are consumed directly instead of being expanded into a
-  full float32 side buffer. The NEON backend computes BF16 matvecs two output
-  rows at a time to reuse input vector loads.
+  full float32 side buffer.
+- NEON and AVX2 compute BF16 matvecs two output rows at a time to reuse input
+  vector loads.
+- AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
+  at a time.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -316,6 +342,28 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
 | generic, BF16 linear, `-t 8` | 3.41 s | 3.22x |
+
+## Smoke Checks
+
+```bash
+python3 -m py_compile tools/convert_nemo.py
+make clean && make
+
+./nemotron_asr \
+  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  -i ../qwen-asr/samples/jfk.wav \
+  -l en-US \
+  --strip-tags \
+  -t 8
+
+make generic
+./nemotron_asr \
+  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  -i ../qwen-asr/samples/jfk.wav \
+  -l en-US \
+  --strip-tags \
+  -t 8
+```
 
 ## Model Facts
 

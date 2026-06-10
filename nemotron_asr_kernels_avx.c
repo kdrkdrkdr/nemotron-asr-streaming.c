@@ -17,6 +17,13 @@ static inline float hsum_m256(__m256 v) {
     return _mm_cvtss_f32(sum);
 }
 
+static inline float bf16_to_f32_scalar(uint16_t v) {
+    uint32_t bits = (uint32_t)v << 16;
+    float out;
+    memcpy(&out, &bits, sizeof(out));
+    return out;
+}
+
 static inline float dot_f32_avx_inline(const float *a, const float *b, int n) {
 #if defined(__AVX512F__)
     int i = 0;
@@ -118,19 +125,168 @@ float nemo_dot_bf16_f32_avx(const float *a, const uint16_t *b, int n) {
     float sum = hsum_m256(acc0);
 #endif
     for (; i < n; i++) {
-        uint32_t bits = (uint32_t)b[i] << 16;
-        float wv;
-        memcpy(&wv, &bits, sizeof(wv));
-        sum += a[i] * wv;
+        sum += a[i] * bf16_to_f32_scalar(b[i]);
     }
     return sum;
 }
 
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+static inline __m512 bf16x16_to_f32_avx512(const uint16_t *src) {
+    __m256i raw = _mm256_loadu_si256((const __m256i *)src);
+    return _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(raw), 16));
+}
+
+static inline void bf16_dot4_avx512(const float *x,
+                                    const uint16_t *w0, const uint16_t *w1,
+                                    const uint16_t *w2, const uint16_t *w3,
+                                    int in_dim, float *s0_out, float *s1_out,
+                                    float *s2_out, float *s3_out) {
+    __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps();
+    __m512 a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps();
+    __m512 a4 = _mm512_setzero_ps(), a5 = _mm512_setzero_ps();
+    __m512 a6 = _mm512_setzero_ps(), a7 = _mm512_setzero_ps();
+    int k = 0;
+    for (; k + 32 <= in_dim; k += 32) {
+        __m512 x0 = _mm512_loadu_ps(x + k);
+        __m512 x1 = _mm512_loadu_ps(x + k + 16);
+        a0 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w0 + k), a0);
+        a1 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w0 + k + 16), a1);
+        a2 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w1 + k), a2);
+        a3 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w1 + k + 16), a3);
+        a4 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w2 + k), a4);
+        a5 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w2 + k + 16), a5);
+        a6 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w3 + k), a6);
+        a7 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w3 + k + 16), a7);
+    }
+    for (; k + 16 <= in_dim; k += 16) {
+        __m512 xv = _mm512_loadu_ps(x + k);
+        a0 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w0 + k), a0);
+        a2 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w1 + k), a2);
+        a4 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w2 + k), a4);
+        a6 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w3 + k), a6);
+    }
+    float s0 = _mm512_reduce_add_ps(_mm512_add_ps(a0, a1));
+    float s1 = _mm512_reduce_add_ps(_mm512_add_ps(a2, a3));
+    float s2 = _mm512_reduce_add_ps(_mm512_add_ps(a4, a5));
+    float s3 = _mm512_reduce_add_ps(_mm512_add_ps(a6, a7));
+    for (; k < in_dim; k++) {
+        float xk = x[k];
+        s0 += xk * bf16_to_f32_scalar(w0[k]);
+        s1 += xk * bf16_to_f32_scalar(w1[k]);
+        s2 += xk * bf16_to_f32_scalar(w2[k]);
+        s3 += xk * bf16_to_f32_scalar(w3[k]);
+    }
+    *s0_out = s0;
+    *s1_out = s1;
+    *s2_out = s2;
+    *s3_out = s3;
+}
+
+static inline void bf16_dot2_avx512(const float *x, const uint16_t *w0,
+                                    const uint16_t *w1, int in_dim,
+                                    float *s0_out, float *s1_out) {
+    __m512 a0 = _mm512_setzero_ps(), a1 = _mm512_setzero_ps();
+    __m512 a2 = _mm512_setzero_ps(), a3 = _mm512_setzero_ps();
+    int k = 0;
+    for (; k + 32 <= in_dim; k += 32) {
+        __m512 x0 = _mm512_loadu_ps(x + k);
+        __m512 x1 = _mm512_loadu_ps(x + k + 16);
+        a0 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w0 + k), a0);
+        a1 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w0 + k + 16), a1);
+        a2 = _mm512_fmadd_ps(x0, bf16x16_to_f32_avx512(w1 + k), a2);
+        a3 = _mm512_fmadd_ps(x1, bf16x16_to_f32_avx512(w1 + k + 16), a3);
+    }
+    for (; k + 16 <= in_dim; k += 16) {
+        __m512 xv = _mm512_loadu_ps(x + k);
+        a0 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w0 + k), a0);
+        a2 = _mm512_fmadd_ps(xv, bf16x16_to_f32_avx512(w1 + k), a2);
+    }
+    float s0 = _mm512_reduce_add_ps(_mm512_add_ps(a0, a1));
+    float s1 = _mm512_reduce_add_ps(_mm512_add_ps(a2, a3));
+    for (; k < in_dim; k++) {
+        float xk = x[k];
+        s0 += xk * bf16_to_f32_scalar(w0[k]);
+        s1 += xk * bf16_to_f32_scalar(w1[k]);
+    }
+    *s0_out = s0;
+    *s1_out = s1;
+}
+#else
+static inline __m256 bf16x8_to_f32_avx2(__m128i raw) {
+    return _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_cvtepu16_epi32(raw), 16));
+}
+
+static inline void bf16x16_to_f32_avx2(const uint16_t *src, __m256 *lo, __m256 *hi) {
+    __m256i raw = _mm256_loadu_si256((const __m256i *)src);
+    *lo = bf16x8_to_f32_avx2(_mm256_castsi256_si128(raw));
+    *hi = bf16x8_to_f32_avx2(_mm256_extracti128_si256(raw, 1));
+}
+
+static inline void bf16_dot2_avx2(const float *x, const uint16_t *w0,
+                                  const uint16_t *w1, int in_dim,
+                                  float *s0_out, float *s1_out) {
+    __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+    __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
+    int k = 0;
+    for (; k + 16 <= in_dim; k += 16) {
+        __m256 x0 = _mm256_loadu_ps(x + k);
+        __m256 x1 = _mm256_loadu_ps(x + k + 8);
+        __m256 wlo, whi;
+        bf16x16_to_f32_avx2(w0 + k, &wlo, &whi);
+        a0 = _mm256_fmadd_ps(x0, wlo, a0);
+        a1 = _mm256_fmadd_ps(x1, whi, a1);
+        bf16x16_to_f32_avx2(w1 + k, &wlo, &whi);
+        a2 = _mm256_fmadd_ps(x0, wlo, a2);
+        a3 = _mm256_fmadd_ps(x1, whi, a3);
+    }
+    float s0 = hsum_m256(_mm256_add_ps(a0, a1));
+    float s1 = hsum_m256(_mm256_add_ps(a2, a3));
+    for (; k < in_dim; k++) {
+        float xk = x[k];
+        s0 += xk * bf16_to_f32_scalar(w0[k]);
+        s1 += xk * bf16_to_f32_scalar(w1[k]);
+    }
+    *s0_out = s0;
+    *s1_out = s1;
+}
+#endif
+
 void nemo_bf16_matvec_fused_avx(float *y, const float *x, const uint16_t *w,
                                 const float *b, int in_dim, int out_dim) {
-    for (int o = 0; o < out_dim; o++) {
-        y[o] = nemo_dot_bf16_f32_avx(x, w + (size_t)o * in_dim, in_dim) +
-               (b ? b[o] : 0.0f);
+    int o = 0;
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    for (; o + 3 < out_dim; o += 4) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        const uint16_t *w2 = w1 + in_dim;
+        const uint16_t *w3 = w2 + in_dim;
+        float s0, s1, s2, s3;
+        bf16_dot4_avx512(x, w0, w1, w2, w3, in_dim, &s0, &s1, &s2, &s3);
+        y[o] = s0 + (b ? b[o] : 0.0f);
+        y[o + 1] = s1 + (b ? b[o + 1] : 0.0f);
+        y[o + 2] = s2 + (b ? b[o + 2] : 0.0f);
+        y[o + 3] = s3 + (b ? b[o + 3] : 0.0f);
+    }
+    for (; o + 1 < out_dim; o += 2) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        float s0, s1;
+        bf16_dot2_avx512(x, w0, w1, in_dim, &s0, &s1);
+        y[o] = s0 + (b ? b[o] : 0.0f);
+        y[o + 1] = s1 + (b ? b[o + 1] : 0.0f);
+    }
+#else
+    for (; o + 1 < out_dim; o += 2) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        float s0, s1;
+        bf16_dot2_avx2(x, w0, w1, in_dim, &s0, &s1);
+        y[o] = s0 + (b ? b[o] : 0.0f);
+        y[o + 1] = s1 + (b ? b[o + 1] : 0.0f);
+    }
+#endif
+    for (; o < out_dim; o++) {
+        y[o] = nemo_dot_bf16_f32_avx(x, w + (size_t)o * in_dim, in_dim) + (b ? b[o] : 0.0f);
     }
 }
 
@@ -138,7 +294,72 @@ int nemo_argmax_bf16_range_avx(const float *x, const uint16_t *w, const float *b
                                int in_dim, int start, int end, float *best_val_out) {
     int best = start;
     float best_val = -3.4028234663852886e38f;
-    for (int o = start; o < end; o++) {
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    int o = start;
+    for (; o + 3 < end; o += 4) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        const uint16_t *w2 = w1 + in_dim;
+        const uint16_t *w3 = w2 + in_dim;
+        float s0, s1, s2, s3;
+        bf16_dot4_avx512(x, w0, w1, w2, w3, in_dim, &s0, &s1, &s2, &s3);
+        s0 += b ? b[o] : 0.0f;
+        s1 += b ? b[o + 1] : 0.0f;
+        s2 += b ? b[o + 2] : 0.0f;
+        s3 += b ? b[o + 3] : 0.0f;
+        if (s0 > best_val) {
+            best_val = s0;
+            best = o;
+        }
+        if (s1 > best_val) {
+            best_val = s1;
+            best = o + 1;
+        }
+        if (s2 > best_val) {
+            best_val = s2;
+            best = o + 2;
+        }
+        if (s3 > best_val) {
+            best_val = s3;
+            best = o + 3;
+        }
+    }
+    for (; o + 1 < end; o += 2) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        float s0, s1;
+        bf16_dot2_avx512(x, w0, w1, in_dim, &s0, &s1);
+        s0 += b ? b[o] : 0.0f;
+        s1 += b ? b[o + 1] : 0.0f;
+        if (s0 > best_val) {
+            best_val = s0;
+            best = o;
+        }
+        if (s1 > best_val) {
+            best_val = s1;
+            best = o + 1;
+        }
+    }
+#else
+    int o = start;
+    for (; o + 1 < end; o += 2) {
+        const uint16_t *w0 = w + (size_t)o * in_dim;
+        const uint16_t *w1 = w0 + in_dim;
+        float s0, s1;
+        bf16_dot2_avx2(x, w0, w1, in_dim, &s0, &s1);
+        s0 += b ? b[o] : 0.0f;
+        s1 += b ? b[o + 1] : 0.0f;
+        if (s0 > best_val) {
+            best_val = s0;
+            best = o;
+        }
+        if (s1 > best_val) {
+            best_val = s1;
+            best = o + 1;
+        }
+    }
+#endif
+    for (; o < end; o++) {
         float v = nemo_dot_bf16_f32_avx(x, w + (size_t)o * in_dim, in_dim) +
                   (b ? b[o] : 0.0f);
         if (v > best_val) {

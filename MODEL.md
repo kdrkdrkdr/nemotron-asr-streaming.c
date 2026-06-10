@@ -118,6 +118,19 @@ by the typed linear/matvec wrappers. Biases, layer-norm parameters, depthwise
 convolution filters, mel front-end tensors, and the prediction embedding remain
 float32.
 
+Backend-specific BF16 coverage:
+
+- generic C: reference BF16 row dot, matvec, and classifier argmax range
+- NEON: BF16 row dot plus two-output-row matvec
+- AVX2/FMA: BF16 row dot plus two-output-row matvec and classifier argmax range
+- AVX512F+BW: 16-lane BF16 conversion plus four-output-row matvec and
+  classifier argmax range
+
+The row grouping matters for this model because dense operations are mostly
+streaming matvecs. Reusing each loaded input vector across two or four output
+rows reduces instruction overhead and memory traffic pressure without changing
+the graph.
+
 Qwen-only kernels that are not used by the Nemotron graph should not be carried
 over just for symmetry.
 
