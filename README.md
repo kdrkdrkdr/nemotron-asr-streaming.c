@@ -95,7 +95,7 @@ make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
 make check-kernels  # compare native BF16/Q8 kernels against generic C
-make bench-kernels  # microbenchmark native BF16/Q8 Nemotron-shaped matvecs
+make bench-kernels  # microbenchmark generic/native BF16/Q8 matvecs
 make check-arch-syntax  # syntax-check NEON and AVX/VNNI kernel variants
 make clean
 ```
@@ -105,8 +105,8 @@ dispatches to NEON kernels. On AVX2+FMA x86 builds it dispatches to AVX kernels.
 Otherwise it uses the generic C backend. `make blas` is optional; the normal
 build does not require BLAS. `make check-arch-syntax` is a clang-oriented
 cross-syntax check for the architecture-specific kernel files. `make
-bench-kernels` measures representative dense shapes such as FFN, attention, and
-joint vocabulary projections.
+bench-kernels` measures generic and native backend speed for representative
+dense shapes such as FFN, attention, and joint vocabulary projections.
 
 ## Convert Model
 

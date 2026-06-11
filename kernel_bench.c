@@ -45,12 +45,13 @@ static float checksum(const float *x, int n) {
     return s;
 }
 
-static void print_rate(const char *name, const char *kind,
-                       int in_dim, int out_dim, int iters, double ms) {
+static void print_rate(const char *name, const char *kind, const char *backend,
+                       int in_dim, int out_dim, int iters, double ms,
+                       double speedup) {
     double ops = 2.0 * (double)in_dim * (double)out_dim * (double)iters;
     double gops = ops / (ms * 1.0e6);
-    printf("%-16s %-6s %5d -> %-5d  %6d iters  %8.3f ms  %8.2f GOPS\n",
-           name, kind, in_dim, out_dim, iters, ms, gops);
+    printf("%-16s %-6s %-7s %5d -> %-5d  %6d iters  %8.3f ms  %8.2f GOPS  %6.2fx\n",
+           name, kind, backend, in_dim, out_dim, iters, ms, gops, speedup);
 }
 
 static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
@@ -78,11 +79,22 @@ static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
 
     double t0 = now_ms();
     for (int i = 0; i < iters; i++) {
-        nemo_q8_matvec_fused_impl(y, x, x_scale, w, scales, bias, in_dim, out_dim);
+        nemo_q8_matvec_fused_generic(y, x, x_scale, w, scales, bias, in_dim, out_dim);
         sink_f32 += checksum(y, out_dim);
     }
     double t1 = now_ms();
-    print_rate(name, "q8", in_dim, out_dim, iters, t1 - t0);
+    double generic_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        nemo_q8_matvec_fused_impl(y, x, x_scale, w, scales, bias, in_dim, out_dim);
+        sink_f32 += checksum(y, out_dim);
+    }
+    t1 = now_ms();
+    double native_ms = t1 - t0;
+    print_rate(name, "q8", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
+    print_rate(name, "q8", "native", in_dim, out_dim, iters, native_ms,
+               generic_ms / native_ms);
 
     free(x);
     free(w);
@@ -111,11 +123,22 @@ static int bench_bf16(const char *name, int in_dim, int out_dim, int iters) {
 
     double t0 = now_ms();
     for (int i = 0; i < iters; i++) {
-        nemo_bf16_matvec_fused_impl(y, x, w, bias, in_dim, out_dim);
+        nemo_bf16_matvec_fused_generic(y, x, w, bias, in_dim, out_dim);
         sink_f32 += checksum(y, out_dim);
     }
     double t1 = now_ms();
-    print_rate(name, "bf16", in_dim, out_dim, iters, t1 - t0);
+    double generic_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        nemo_bf16_matvec_fused_impl(y, x, w, bias, in_dim, out_dim);
+        sink_f32 += checksum(y, out_dim);
+    }
+    t1 = now_ms();
+    double native_ms = t1 - t0;
+    print_rate(name, "bf16", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
+    print_rate(name, "bf16", "native", in_dim, out_dim, iters, native_ms,
+               generic_ms / native_ms);
 
     free(x);
     free(w);
@@ -139,7 +162,7 @@ int main(void) {
         {"joint_vocab", 640, 13088, 120, 60},
     };
 
-    printf("Nemotron kernel microbench (native backend)\n");
+    printf("Nemotron kernel microbench (generic vs native backend)\n");
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         if (bench_q8(cases[i].name, cases[i].in_dim, cases[i].out_dim,
                      cases[i].q8_iters) != 0) {
