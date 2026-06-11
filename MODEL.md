@@ -158,9 +158,12 @@ Backend-specific W8A8 coverage:
 
 W8A8 tuning notes from the JFK smoke path:
 
-- Keep activation quantization inside the output-row workers. A shared
-  prequantization pass removes duplicate work, but it serializes a step that
-  was previously parallel and regressed the 8-thread path.
+- Keep multi-row encoder activation quantization inside the output-row
+  workers. A broad shared prequantization pass removes duplicate work, but it
+  serializes a step that was previously parallel and regressed the 8-thread
+  path.
+- Use shared activation prequantization only for single-row Q8/Q8P calls, where
+  the same input vector would otherwise be quantized once per output worker.
 - Keep prompt/LSTM scalar row helpers out of the main encoder hot path unless
   the replacement is measured end to end. A wrapper-dispatched row-dot path was
   slower on the smoke path despite using the same quantized row-dot boundary.
@@ -176,6 +179,9 @@ W8A8 tuning notes from the JFK smoke path:
   vector to the tensor stride.
 - The NEON Q8P four-output-row tile intentionally stays at one 16-byte int8
   multiply/accumulate step per loop to keep register pressure modest.
+- An eight-output-row Q8P tile was tested and rejected on Apple Silicon because
+  the extra accumulators hurt the compiler/backend enough to regress the JFK
+  smoke path.
 - Q8/Q8P runtime wrappers keep the temporary activation quantization buffer on
   the stack for input vectors up to 4096 elements, with heap fallback for
   larger inputs. This covers the dense Nemotron shapes while avoiding

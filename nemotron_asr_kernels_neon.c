@@ -343,20 +343,15 @@ int nemo_argmax_q8_range_neon(const int8_t *x_q8, float x_scale,
     return best;
 }
 
-static inline const int8_t *q8p_row_block_neon(const int8_t *w, int row,
-                                               int stride, int k) {
-    const int tile = row >> 2;
-    const int lane = row & 3;
-    return w + (size_t)tile * 4u * (size_t)stride +
-           (size_t)(k >> 4) * 64u + (size_t)lane * 16u;
-}
-
 static inline int32_t dot_i8p_neon_inline(const int8_t *x, const int8_t *w,
                                           int row, int stride) {
+    const int tile = row >> 2;
+    const int lane = row & 3;
+    const int8_t *wr = w + (size_t)tile * 4u * (size_t)stride + (size_t)lane * 16u;
     int32x4_t acc = vdupq_n_s32(0);
-    for (int k = 0; k < stride; k += 16) {
+    for (int k = 0; k < stride; k += 16, wr += 64) {
         int8x16_t xv = vld1q_s8(x + k);
-        int8x16_t wv = vld1q_s8(q8p_row_block_neon(w, row, stride, k));
+        int8x16_t wv = vld1q_s8(wr);
         acc = vpadalq_s16(acc, vmull_s8(vget_low_s8(xv), vget_low_s8(wv)));
         acc = vpadalq_s16(acc, vmull_s8(vget_high_s8(xv), vget_high_s8(wv)));
     }
@@ -368,13 +363,12 @@ static inline void dot4_i8p_neon_inline(const int8_t *x, const int8_t *w,
                                         int32_t *s0_out, int32_t *s1_out,
                                         int32_t *s2_out, int32_t *s3_out) {
     const int tile = row >> 2;
-    const int8_t *tile_base = w + (size_t)tile * 4u * (size_t)stride;
+    const int8_t *blk = w + (size_t)tile * 4u * (size_t)stride;
     int32x4_t a0 = vdupq_n_s32(0);
     int32x4_t a1 = vdupq_n_s32(0);
     int32x4_t a2 = vdupq_n_s32(0);
     int32x4_t a3 = vdupq_n_s32(0);
-    for (int k = 0; k < stride; k += 16) {
-        const int8_t *blk = tile_base + (size_t)(k >> 4) * 64u;
+    for (int k = 0; k < stride; k += 16, blk += 64) {
         int8x16_t xv = vld1q_s8(x + k);
         int8x8_t xlo = vget_low_s8(xv);
         int8x8_t xhi = vget_high_s8(xv);

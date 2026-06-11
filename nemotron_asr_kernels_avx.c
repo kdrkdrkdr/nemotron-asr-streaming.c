@@ -279,20 +279,15 @@ int nemo_argmax_q8_range_avx(const int8_t *x_q8, float x_scale,
     return best;
 }
 
-static inline const int8_t *q8p_row_block_avx(const int8_t *w, int row,
-                                              int stride, int k) {
-    const int tile = row >> 2;
-    const int lane = row & 3;
-    return w + (size_t)tile * 4u * (size_t)stride +
-           (size_t)(k >> 4) * 64u + (size_t)lane * 16u;
-}
-
 static inline int32_t dot_i8p_avx_inline(const int8_t *x, const int8_t *w,
                                          int row, int stride) {
+    const int tile = row >> 2;
+    const int lane = row & 3;
+    const int8_t *wr = w + (size_t)tile * 4u * (size_t)stride + (size_t)lane * 16u;
     __m256i acc = _mm256_setzero_si256();
-    for (int k = 0; k < stride; k += 16) {
+    for (int k = 0; k < stride; k += 16, wr += 64) {
         __m256i xv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(x + k)));
-        __m256i wv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)q8p_row_block_avx(w, row, stride, k)));
+        __m256i wv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)wr));
         acc = _mm256_add_epi32(acc, _mm256_madd_epi16(xv, wv));
     }
     return hsum_m256i_epi32(acc);
@@ -303,13 +298,12 @@ static inline void dot4_i8p_avx_inline(const int8_t *x, const int8_t *w,
                                        int32_t *s0_out, int32_t *s1_out,
                                        int32_t *s2_out, int32_t *s3_out) {
     const int tile = row >> 2;
-    const int8_t *tile_base = w + (size_t)tile * 4u * (size_t)stride;
+    const int8_t *blk = w + (size_t)tile * 4u * (size_t)stride;
     __m256i a0 = _mm256_setzero_si256();
     __m256i a1 = _mm256_setzero_si256();
     __m256i a2 = _mm256_setzero_si256();
     __m256i a3 = _mm256_setzero_si256();
-    for (int k = 0; k < stride; k += 16) {
-        const int8_t *blk = tile_base + (size_t)(k >> 4) * 64u;
+    for (int k = 0; k < stride; k += 16, blk += 64) {
         __m256i xv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(x + k)));
         a0 = _mm256_add_epi32(a0,
                               _mm256_madd_epi16(xv, _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)blk))));

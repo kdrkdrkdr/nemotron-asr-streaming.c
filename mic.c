@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MIC_NUM_BUFFERS 3
 
@@ -38,6 +39,8 @@ typedef struct {
     int mel_chunks;
     int encoder_chunks;
     int enc_frames_total;
+    int status_tty;
+    int status_active;
 } live_asr_t;
 
 typedef struct {
@@ -309,7 +312,7 @@ static void usage(const char *argv0) {
             "  --max-symbols N    Max non-blank RNNT labels per frame (default 10)\n"
             "  --buffer-ms N      AudioQueue buffer size in milliseconds (default 80)\n"
             "  --queue-sec N      Max queued microphone audio before dropping oldest samples (default 20)\n"
-            "  --meter            Print captured-audio queue and peak level every second\n"
+            "  --meter            Show input queue/peak as a temporary status line\n"
             "  --trace            Print chunk/tokens trace lines and final timing summary\n"
             "  --no-trace         Accepted for compatibility; transcript-only is the default\n",
             argv0);
@@ -419,10 +422,29 @@ static void fifo_stats_take(sample_fifo_t *f, size_t *queued, size_t *pushed, fl
     pthread_mutex_unlock(&f->lock);
 }
 
+static void clear_status_line(live_asr_t *s) {
+    if (!s || !s->status_active) return;
+    if (s->status_tty) {
+        fprintf(stderr, "\r\033[K");
+        fflush(stderr);
+    }
+    s->status_active = 0;
+}
+
+static void print_meter_status(live_asr_t *s, double captured_s, double delta_s,
+                               double queued_s, float peak) {
+    if (!s || !s->status_tty || s->printed_len > 0) return;
+    fprintf(stderr, "\r\033[K[mic] captured=%.2fs (+%.2fs) queued=%.2fs peak=%.3f",
+            captured_s, delta_s, queued_s, peak);
+    fflush(stderr);
+    s->status_active = 1;
+}
+
 static void print_text_delta(live_asr_t *s) {
     const char *text = nemo_rnnt_stream_text(s->rnnt);
     size_t len = nemo_rnnt_stream_text_len(s->rnnt);
     if (len > s->printed_len) {
+        clear_status_line(s);
         fwrite(text + s->printed_len, 1, len - s->printed_len, stdout);
         fflush(stdout);
         s->printed_len = len;
@@ -471,6 +493,7 @@ static int live_asr_init(live_asr_t *s, nemo_ctx_t *ctx, int trace) {
     s->rnnt = nemo_rnnt_stream_create(ctx);
     s->enc = nemo_encoder_stream_create(ctx);
     s->mel = nemo_mel_stream_create(ctx);
+    s->status_tty = isatty(STDERR_FILENO);
     if (!s->rnnt || !s->enc || !s->mel) return -1;
     ctx->perf_audio_ms = 0.0;
     ctx->perf_mel_ms = 0.0;
@@ -739,6 +762,7 @@ int main(int argc, char **argv) {
         }
         size_t dropped = fifo_dropped(&fifo);
         if (dropped != last_dropped) {
+            clear_status_line(&asr);
             fprintf(stderr, "\n[nemotron_mic] dropped %.2fs of queued microphone audio\n",
                     (double)(dropped - last_dropped) / (double)NEMO_SAMPLE_RATE);
             last_dropped = dropped;
@@ -749,11 +773,15 @@ int main(int argc, char **argv) {
             size_t pushed = 0;
             float peak = 0.0f;
             fifo_stats_take(&fifo, &queued, &pushed, &peak);
-            fprintf(stderr, "\n[mic] captured=%.2fs (+%.2fs) queued=%.2fs peak=%.3f\n",
-                    (double)pushed / (double)NEMO_SAMPLE_RATE,
-                    (double)(pushed - last_pushed) / (double)NEMO_SAMPLE_RATE,
-                    (double)queued / (double)NEMO_SAMPLE_RATE,
-                    peak);
+            double captured_s = (double)pushed / (double)NEMO_SAMPLE_RATE;
+            double delta_s = (double)(pushed - last_pushed) / (double)NEMO_SAMPLE_RATE;
+            double queued_s = (double)queued / (double)NEMO_SAMPLE_RATE;
+            if (trace) {
+                fprintf(stderr, "\n[mic] captured=%.2fs (+%.2fs) queued=%.2fs peak=%.3f\n",
+                        captured_s, delta_s, queued_s, peak);
+            } else {
+                print_meter_status(&asr, captured_s, delta_s, queued_s, peak);
+            }
             last_pushed = pushed;
             last_meter_ms = now;
         }
@@ -775,6 +803,7 @@ int main(int argc, char **argv) {
         text = nemo_rnnt_stream_finish(asr.rnnt);
         asr.rnnt = NULL;
     }
+    clear_status_line(&asr);
     if (asr.printed_len > 0) {
         fputc('\n', stdout);
         fflush(stdout);

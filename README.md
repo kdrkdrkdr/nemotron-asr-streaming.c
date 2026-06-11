@@ -218,15 +218,15 @@ Select a device by index, AudioDeviceID, UID, or exact name:
   -t 8 \
   -l ko-KR \
   --strip-tags \
-  --att-right 3 \
-  --meter
+  --att-right 3
 ```
 
 On macOS, virtual devices such as BlackHole or VB-Cable may be the default
 input. If microphone audio seems silent, run `--list-devices` and pass the
 actual microphone with `--device`.
 
-`--meter` prints captured audio diagnostics once per second:
+For input debugging, add `--meter`. Before transcript output begins it shows a
+temporary status line with captured audio diagnostics:
 
 ```text
 [mic] captured=3.00s (+1.00s) queued=0.12s peak=0.083
@@ -364,6 +364,9 @@ Threading:
   full float32 side buffer.
 - W8A8 linear weights are consumed directly from the mmap'd packed int8 payload
   and use dynamic per-vector activation quantization.
+- Single-row W8A8 calls share one prequantized activation buffer across output
+  worker threads; multi-row encoder calls keep per-worker stack quantization to
+  avoid an extra synchronization point.
 - NEON and AVX2 compute BF16 matvecs and classifier argmax ranges two output
   rows at a time to reuse input vector loads.
 - AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
@@ -380,7 +383,7 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | native fp32, `-t 1` | 10.54 s | 1.04x |
 | native fp32, `-t 8` | 9.65 s | 1.14x |
 | native BF16 linear, `-t 8` | 4.34 s | 2.53x |
-| native W8A8 Q8P linear, `-t 8` | 2.26 s | 4.87x |
+| native W8A8 Q8P linear, `-t 8` | 1.92 s | 5.73x |
 | generic fp32, `-t 8` | 6.21 s | 1.77x |
 
 ## Smoke Checks
