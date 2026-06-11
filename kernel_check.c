@@ -139,6 +139,22 @@ static int check_bf16_matvec_case(int in_dim, int out_dim) {
         }
     }
 
+    int start = out_dim > 3 ? 1 : 0;
+    int end = out_dim > 3 ? out_dim - 1 : out_dim;
+    float vg = 0.0f, vi = 0.0f;
+    int bg = nemo_argmax_bf16_range_generic(x, w, bias, in_dim, start, end, &vg);
+    int bi = nemo_argmax_bf16_range_impl(x, w, bias, in_dim, start, end, &vi);
+    if (bg != bi || !nearly_equal(vg, vi, 5e-4f, 5e-4f)) {
+        fprintf(stderr, "bf16 argmax mismatch in=%d out=%d generic=(%d,%g) impl=(%d,%g)\n",
+                in_dim, out_dim, bg, vg, bi, vi);
+        free(x);
+        free(w);
+        free(bias);
+        free(yg);
+        free(yi);
+        return -1;
+    }
+
     free(x);
     free(w);
     free(bias);
