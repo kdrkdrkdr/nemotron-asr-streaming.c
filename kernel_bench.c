@@ -1,3 +1,4 @@
+#include "nemotron_asr_kernels.h"
 #include "nemotron_asr_kernels_impl.h"
 
 #include <stdint.h>
@@ -154,6 +155,60 @@ static int bench_q8_argmax(const char *name, int in_dim, int out_dim, int iters)
     return 0;
 }
 
+static int bench_q8_runtime(const char *name, int in_dim, int out_dim, int iters) {
+    float *x = (float *)malloc((size_t)in_dim * sizeof(float));
+    int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
+    float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
+    float *y = (float *)malloc((size_t)out_dim * sizeof(float));
+    if (!x || !w || !scales || !bias || !y) {
+        fprintf(stderr, "allocation failed in q8 runtime bench\n");
+        free(x);
+        free(w);
+        free(scales);
+        free(bias);
+        free(y);
+        return -1;
+    }
+    for (int i = 0; i < in_dim; i++) x[i] = next_f32(0.002f);
+    for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    for (int o = 0; o < out_dim; o++) {
+        scales[o] = 0.0002f + 0.00001f * (float)(o % 11);
+        bias[o] = next_f32(0.001f);
+    }
+    nemo_weight_t weight = {
+        .q8 = w,
+        .q8_scales = scales,
+        .dtype = NEMO_TENSOR_Q8,
+    };
+
+    double t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        nemo_linear_weight(y, x, &weight, bias, 1, in_dim, out_dim);
+        sink_f32 += checksum(y, out_dim);
+    }
+    double t1 = now_ms();
+    double linear_ms = t1 - t0;
+    print_rate(name, "q8wrap", "runtime", in_dim, out_dim, iters, linear_ms, 1.0);
+
+    float best_val = 0.0f;
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_matvec_weight(x, &weight, bias, in_dim, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    t1 = now_ms();
+    double argmax_ms = t1 - t0;
+    print_rate(name, "q8argw", "runtime", in_dim, out_dim, iters, argmax_ms, 1.0);
+
+    free(x);
+    free(w);
+    free(scales);
+    free(bias);
+    free(y);
+    return 0;
+}
+
 static int bench_bf16(const char *name, int in_dim, int out_dim, int iters) {
     float *x = (float *)malloc((size_t)in_dim * sizeof(float));
     uint16_t *w = (uint16_t *)malloc((size_t)in_dim * (size_t)out_dim * sizeof(uint16_t));
@@ -239,6 +294,8 @@ static int bench_bf16_argmax(const char *name, int in_dim, int out_dim, int iter
 }
 
 int main(void) {
+    nemo_set_threads(1);
+
     struct bench_case {
         const char *name;
         int in_dim;
@@ -269,6 +326,10 @@ int main(void) {
         }
         if (bench_bf16_argmax(cases[i].name, cases[i].in_dim, cases[i].out_dim,
                               cases[i].bf16_iters) != 0) {
+            return 1;
+        }
+        if (bench_q8_runtime(cases[i].name, cases[i].in_dim, cases[i].out_dim,
+                             cases[i].q8_iters) != 0) {
             return 1;
         }
     }

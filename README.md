@@ -107,7 +107,8 @@ build does not require BLAS. `make check-arch-syntax` is a clang-oriented
 cross-syntax check for the architecture-specific kernel files. `make
 bench-kernels` measures generic and native backend speed for representative
 dense matvec and classifier argmax shapes such as FFN, attention, and joint
-vocabulary projections.
+vocabulary projections. It also reports the Q8 runtime wrapper path that
+includes dynamic activation quantization.
 
 ## Convert Model
 

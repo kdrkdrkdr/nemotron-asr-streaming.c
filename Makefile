@@ -15,7 +15,7 @@ OBJS = $(SRCS:.c=.o)
 RUNTIME_OBJS = $(RUNTIME_SRCS:.c=.o)
 MIC_OBJS = mic.o $(RUNTIME_OBJS)
 KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
-KERNEL_BENCH_OBJS = kernel_bench.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
+KERNEL_BENCH_OBJS = kernel_bench.o nemotron_asr_kernels.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 UNAME_S := $(shell uname -s)
 
 .PHONY: all clean debug generic blas mic check-kernels bench-kernels check-arch-syntax
