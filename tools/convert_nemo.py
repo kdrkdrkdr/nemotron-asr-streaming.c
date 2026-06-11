@@ -24,7 +24,6 @@ MAGIC = b"NM35ASR\0"
 VERSION = 1
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
-DTYPE_Q8 = 3
 DTYPE_Q8P = 4
 
 
@@ -111,21 +110,6 @@ def tensor_bf16_bytes(tensor: torch.Tensor) -> bytes:
     rounded = bits + (((bits >> 16) & 1) + 0x7FFF)
     bf16 = (rounded >> 16).astype("<u2", copy=False)
     return bf16.tobytes(order="C")
-
-
-def tensor_q8_bytes(tensor: torch.Tensor) -> bytes:
-    arr = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
-    if arr.ndim == 0:
-        raise ValueError("cannot q8-quantize scalar tensor")
-    rows = int(arr.shape[0])
-    flat = arr.reshape(rows, -1)
-    max_abs = np.max(np.abs(flat), axis=1)
-    scales = (max_abs / 127.0).astype("<f4", copy=False)
-    safe_scales = scales.copy()
-    safe_scales[safe_scales == 0.0] = 1.0
-    q = np.rint(flat / safe_scales[:, None])
-    q = np.clip(q, -127, 127).astype(np.int8, copy=False)
-    return scales.tobytes(order="C") + q.tobytes(order="C")
 
 
 def tensor_q8p_bytes(tensor: torch.Tensor) -> bytes:

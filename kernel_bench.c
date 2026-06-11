@@ -108,29 +108,10 @@ static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
 
     double t0 = now_ms();
     for (int i = 0; i < iters; i++) {
-        nemo_q8_matvec_fused_generic(y, x, x_scale, w, scales, bias, in_dim, out_dim);
-        sink_f32 += checksum(y, out_dim);
-    }
-    double t1 = now_ms();
-    double generic_ms = t1 - t0;
-
-    t0 = now_ms();
-    for (int i = 0; i < iters; i++) {
-        nemo_q8_matvec_fused_impl(y, x, x_scale, w, scales, bias, in_dim, out_dim);
-        sink_f32 += checksum(y, out_dim);
-    }
-    t1 = now_ms();
-    double native_ms = t1 - t0;
-    print_rate(name, "q8", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
-    print_rate(name, "q8", "native", in_dim, out_dim, iters, native_ms,
-               generic_ms / native_ms);
-
-    t0 = now_ms();
-    for (int i = 0; i < iters; i++) {
         nemo_q8p_matvec_fused_generic(y, xpad, x_scale, wp, scales, bias, stride, 0, out_dim);
         sink_f32 += checksum(y, out_dim);
     }
-    t1 = now_ms();
+    double t1 = now_ms();
     double generic_packed_ms = t1 - t0;
 
     t0 = now_ms();
@@ -186,32 +167,11 @@ static int bench_q8_argmax(const char *name, int in_dim, int out_dim, int iters)
 
     double t0 = now_ms();
     for (int i = 0; i < iters; i++) {
-        int best = nemo_argmax_q8_range_generic(x, x_scale, w, scales, bias,
-                                                in_dim, 0, out_dim, &best_val);
-        sink_f32 += best_val + (float)best;
-    }
-    double t1 = now_ms();
-    double generic_ms = t1 - t0;
-
-    t0 = now_ms();
-    for (int i = 0; i < iters; i++) {
-        int best = nemo_argmax_q8_range_impl(x, x_scale, w, scales, bias,
-                                             in_dim, 0, out_dim, &best_val);
-        sink_f32 += best_val + (float)best;
-    }
-    t1 = now_ms();
-    double native_ms = t1 - t0;
-    print_rate(name, "q8arg", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
-    print_rate(name, "q8arg", "native", in_dim, out_dim, iters, native_ms,
-               generic_ms / native_ms);
-
-    t0 = now_ms();
-    for (int i = 0; i < iters; i++) {
         int best = nemo_argmax_q8p_range_generic(xpad, x_scale, wp, scales, bias,
                                                  stride, 0, out_dim, &best_val);
         sink_f32 += best_val + (float)best;
     }
-    t1 = now_ms();
+    double t1 = now_ms();
     double generic_packed_ms = t1 - t0;
 
     t0 = now_ms();
@@ -265,7 +225,6 @@ static int bench_q8_runtime(const char *name, int in_dim, int out_dim, int iters
         .q8 = wp,
         .q8_scales = scales,
         .q8_stride = (uint32_t)stride,
-        .q8_packed = 1,
         .dtype = NEMO_TENSOR_Q8P,
     };
 

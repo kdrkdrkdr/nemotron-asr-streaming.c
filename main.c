@@ -84,20 +84,17 @@ int main(int argc, char **argv) {
     if (model_info) {
         int f32_tensors = 0;
         int bf16_tensors = 0;
-        int q8_tensors = 0;
         int q8p_tensors = 0;
         uint64_t f32_bytes = 0;
         uint64_t bf16_bytes = 0;
-        uint64_t q8_bytes = 0;
+        uint64_t q8p_bytes = 0;
         for (int i = 0; i < ctx->model.n_tensors; i++) {
             if (ctx->model.tensors[i].dtype == NEMO_TENSOR_BF16) {
                 bf16_tensors++;
                 bf16_bytes += ctx->model.tensors[i].nbytes;
-            } else if (ctx->model.tensors[i].dtype == NEMO_TENSOR_Q8 ||
-                       ctx->model.tensors[i].dtype == NEMO_TENSOR_Q8P) {
-                q8_tensors++;
-                if (ctx->model.tensors[i].dtype == NEMO_TENSOR_Q8P) q8p_tensors++;
-                q8_bytes += ctx->model.tensors[i].nbytes;
+            } else if (ctx->model.tensors[i].dtype == NEMO_TENSOR_Q8P) {
+                q8p_tensors++;
+                q8p_bytes += ctx->model.tensors[i].nbytes;
             } else {
                 f32_tensors++;
                 f32_bytes += ctx->model.tensors[i].nbytes;
@@ -107,8 +104,8 @@ int main(int argc, char **argv) {
         printf("  tensors: %d\n", ctx->model.n_tensors);
         printf("  f32:     %d tensors, %.2f GiB\n", f32_tensors, (double)f32_bytes / (1024.0 * 1024.0 * 1024.0));
         printf("  bf16:    %d tensors, %.2f GiB\n", bf16_tensors, (double)bf16_bytes / (1024.0 * 1024.0 * 1024.0));
-        printf("  q8:      %d tensors, %.2f GiB (%d packed Q8P)\n",
-               q8_tensors, (double)q8_bytes / (1024.0 * 1024.0 * 1024.0), q8p_tensors);
+        printf("  q8p:     %d tensors, %.2f GiB\n",
+               q8p_tensors, (double)q8p_bytes / (1024.0 * 1024.0 * 1024.0));
         printf("  vocab:   %d (+ blank id %d)\n", ctx->model.vocab_size, NEMO_BLANK_ID);
         printf("  encoder: FastConformer cache-aware, layers=%d, d_model=%d, heads=%d\n",
                NEMO_ENC_LAYERS, NEMO_D_MODEL, NEMO_ENC_HEADS);

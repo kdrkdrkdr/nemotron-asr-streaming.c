@@ -31,15 +31,15 @@ PyTorch, ONNX Runtime, or NeMo dependency in the inference path.
 # Convert the original NeMo archive once.
 python3 tools/convert_nemo.py \
   ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
-  -o nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
-  --bf16-linear-weights
+  -o nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
+  --w8a8-linear-weights
 
 # Build the normal WAV CLI.
 make
 
 # Transcribe a WAV file.
 ./nemotron_asr \
-  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   -i ../qwen-asr/samples/jfk.wav \
   -l en-US \
   --strip-tags
@@ -47,22 +47,19 @@ make
 
 Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not.
 
-For normal use, prefer the BF16 linear file. It keeps normalization, bias,
-convolution, mel, and embedding tensors in float32, but stores dense linear and
-classifier weights as BF16 so the runtime can skip a large float32 expansion.
-The `w8a8` branch also includes an experimental linear-weight W8A8 path for
-smaller model files and faster CPU experiments.
+For this branch, use the W8A8 linear file. Dense linear, LSTM, and classifier
+weights are stored as packed Q8P int8 with 32-bit row scales. Runtime
+activation vectors are quantized at the typed dense call sites, then the graph
+continues in its normal streaming representation.
 
 ## Features
 
 - **Pure C inference**: C11 runtime with libc/libm/pthread only by default.
 - **Memory-mapped model file**: converted weights are mmap'd from a compact
   tensor stream.
-- **Mixed BF16 linear weights**: optional converter path stores dense linear,
-  LSTM, and vocabulary classifier weights as BF16 and runs them directly.
-- **Experimental W8A8 linear weights**: optional converter path stores the same
-  dense weights as packed per-row int8 and dynamically quantizes activations
-  for int8 matvec inference.
+- **Packed W8A8 linear weights**: primary converter path stores dense linear,
+  LSTM, and vocabulary classifier weights as Q8P packed int8 and dynamically
+  quantizes activations for int8 matvec inference.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
   cache-aware `att_context_size` right context.
 - **Incremental front end**: audio samples and mel frames are accepted
@@ -73,16 +70,14 @@ smaller model files and faster CPU experiments.
   encoder chunks.
 - **Language prompt control**: supports prompt IDs such as `auto`, `en-US`, and
   `ko-KR`.
-- **Native kernels**: generic C fallback plus NEON, AVX2/FMA, and AVX512F+BW
-  dispatch for hot math paths.
+- **Native kernels**: generic C fallback plus NEON and AVX2 dispatch for the
+  W8A8 hot path.
 - **Threaded dense path**: qwen-asr-style persistent worker pool for large
-  fp32 linear/matvec/argmax operations.
+  dense linear, matvec, and classifier operations.
 - **Fused QKV projection**: encoder attention computes Q/K/V in one scheduled
   projection pass to reduce dispatch overhead on small streaming chunks.
 - **Low-allocation streaming loop**: encoder, prompt, and RNN-T projection
   scratch buffers are reused across chunks.
-- **Optional BLAS build**: `make blas` can route larger dense batches through
-  Accelerate/OpenBLAS while keeping the default build dependency-free.
 - **Live testing**: macOS microphone CLI with input device selection and a
   real-time input meter.
 
@@ -91,45 +86,27 @@ smaller model files and faster CPU experiments.
 ```bash
 make          # native optimized build
 make generic  # force scalar C fallback with NEMO_FORCE_GENERIC
-make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
-make check-kernels  # compare native BF16/Q8/Q8P kernels against generic C
-make bench-kernels  # microbenchmark generic/native BF16/Q8/Q8P matvec/argmax paths
+make check-kernels  # compare native W8A8 kernels against generic C
+make bench-kernels  # microbenchmark generic/native W8A8 matvec/argmax paths
 make check-arch-syntax  # syntax-check NEON and AVX kernel variants
 make clean
 ```
 
 `make` uses `-march=native`, `-ffast-math`, and LTO by default. On ARM builds it
 dispatches to NEON kernels. On AVX2+FMA x86 builds it dispatches to AVX kernels.
-Otherwise it uses the generic C backend. `make blas` is optional; the normal
-build does not require BLAS. `make check-arch-syntax` is a clang-oriented
-cross-syntax check for the architecture-specific kernel files. `make
-bench-kernels` measures generic and native backend speed for representative
-dense matvec and classifier argmax shapes such as FFN, attention, and joint
-vocabulary projections. It also reports the packed Q8P runtime wrapper path
-that includes dynamic activation quantization.
+Otherwise it uses the generic C backend. `make check-arch-syntax` is a
+clang-oriented cross-syntax check for the architecture-specific kernel files.
+`make bench-kernels` measures generic and native backend speed for
+representative dense matvec and classifier argmax shapes such as FFN,
+attention, and joint vocabulary projections. It also reports the packed Q8P
+runtime wrapper path that includes dynamic activation quantization.
 
 ## Convert Model
 
-The C runtime does not load `.nemo` directly. Convert once:
-
-```bash
-python3 tools/convert_nemo.py \
-  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
-  -o nemotron-3.5-asr-streaming-0.6b.bin
-```
-
-Recommended smaller/faster mixed-weight file:
-
-```bash
-python3 tools/convert_nemo.py \
-  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
-  -o nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
-  --bf16-linear-weights
-```
-
-Experimental W8A8 linear-weight file:
+The C runtime does not load `.nemo` directly. Convert once into the W8A8 model
+file used by this branch:
 
 ```bash
 python3 tools/convert_nemo.py \
@@ -145,30 +122,27 @@ The converter reads:
 - `cfg["joint"]["vocabulary"]`
 
 It writes a little-endian `.bin` file containing 64-byte-aligned tensor payloads
-followed by vocabulary strings. By default all tensors are float32. With
-`--bf16-linear-weights`, dense encoder, prompt, RNN-T prediction, and joint
-classifier weights are written as BF16 while normalization, bias, convolution,
-mel, and embedding tensors remain float32. With `--w8a8-linear-weights`, those
-dense weights are written as Q8P: per-output-row int8 plus float32 row scales,
-packed in four-output-row tiles with a 16-byte padded input stride. Activations
-remain float32 in the graph and are quantized to int8 only at typed
-linear/matvec call sites, then padded with zeros to the packed stride. The BF16
-and W8A8 converter options are mutually exclusive.
+followed by vocabulary strings. With `--w8a8-linear-weights`, dense encoder,
+prompt, RNN-T prediction, and joint classifier weights are written as Q8P:
+per-output-row int8 plus 32-bit row scales, packed in four-output-row tiles
+with a 16-byte padded input stride. Runtime activation vectors are quantized to
+int8 only at typed linear/matvec call sites, then padded with zeros to the
+packed stride.
 
 ## WAV Usage
 
 ```bash
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav
 ```
 
 Useful options:
 
 ```bash
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l ko-KR
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l en-US --strip-tags
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav --att-right 6
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -t 8
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin --model-info
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -l ko-KR
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -l en-US --strip-tags
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav --att-right 6
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -t 8
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --model-info
 ```
 
 The WAV path loads the file, resamples to 16 kHz mono if needed, and then feeds
@@ -184,7 +158,7 @@ the audio through the same chunked streaming graph used by live input.
   320 ms chunk family.
 - **More right context**: use `--att-right 6` or `--att-right 13`. This adds
   latency but can improve difficult audio.
-- **CPU throughput testing**: use the BF16 linear model file and set `-t N` to
+- **CPU throughput testing**: use the W8A8 linear model file and set `-t N` to
   the number of useful CPU cores.
 
 ## Live Microphone
@@ -197,7 +171,7 @@ Chunk and token diagnostics are hidden unless `--trace` is enabled.
 make mic
 
 ./nemotron_asr_mic \
-  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   -l ko-KR \
   --strip-tags \
   --att-right 3
@@ -213,7 +187,7 @@ Select a device by index, AudioDeviceID, UID, or exact name:
 
 ```bash
 ./nemotron_asr_mic \
-  -m nemotron-3.5-asr-streaming-0.6b.bin \
+  -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   --device 1 \
   -t 8 \
   -l ko-KR \
@@ -243,7 +217,7 @@ Use `Ctrl-C` to stop and flush the final chunk.
 For chunk-level debugging:
 
 ```bash
-./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin --trace
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --trace
 ```
 
 ## Streaming Chunk Settings
@@ -271,7 +245,7 @@ units. If omitted, it defaults to `att_right + 1`.
 
 ```bash
 # Lower input push latency while keeping the model chunk family.
-./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin \
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   --device 1 --att-right 3 --push-frames 1 --meter
 ```
 
@@ -310,43 +284,33 @@ Default language prompt is `auto`.
 Examples:
 
 ```bash
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l auto
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l en-US
-./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b.bin -i audio.wav -l ko-KR
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -l auto
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -l en-US
+./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -i audio.wav -l ko-KR
 ```
 
 Use `--strip-tags` to remove emitted language tags such as `<en-US>`.
 
 ## Kernels
 
-The public kernel surface covers the current hot path:
+The public kernel surface focuses on the current W8A8 hot path:
 
-- `nemo_dot_f32`
-- `nemo_attention_score_f32`
-- `nemo_matvec_f32`
-- `nemo_argmax_matvec_f32`
-- `nemo_vec_axpy_inplace`
-- `nemo_preconv_emit_f32`
-- `nemo_fft512_power_f32`
-- `nemo_linear3_nobias` for fused encoder Q/K/V projection
-- `nemo_prompt_linear_relu` for language prompt projection
-- `nemo_lstm_gates_f32` for fused RNN-T prediction LSTM gates
-- typed-weight variants such as `nemo_linear_weight`,
-  `nemo_linear3_nobias_weight`, and `nemo_argmax_matvec_weight` for direct
-  f32/BF16/Q8/Q8P dispatch
+- packed Q8P matvec
+- packed Q8P classifier argmax range
+- typed-weight linear wrappers for direct Q8P dispatch
+- fused encoder Q/K/V projection
+- language prompt projection
+- fused RNN-T prediction LSTM gates
+- supporting streaming kernels for attention, residual accumulation,
+  subsampling preconv, and mel front-end work
 
 Backends:
 
-- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32, BF16, Q8, and
-  packed Q8P dense paths.
-- `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
-  BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, pointwise streaming preconv, and base NEON Q8/Q8P matvec/argmax.
-- `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
-  BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, pointwise streaming preconv, and Q8/Q8P matvec/argmax.
-- `nemotron_asr_kernels_avx.c` on AVX512F+BW: 16-lane BF16 conversion plus
-  four-output-row BF16 matvec/argmax range.
+- `nemotron_asr_kernels_generic.c`: scalar C fallback for W8A8 Q8P dense paths.
+- `nemotron_asr_kernels_neon.c`: ARM NEON implementation for base integer SIMD
+  Q8P matvec and classifier argmax.
+- `nemotron_asr_kernels_avx.c`: AVX2 implementation for Q8P matvec and
+  classifier argmax.
 - Q8P paths use baseline NEON and AVX2 integer SIMD only: no dotprod, i8mm,
   VNNI, or AVX512-VNNI dependency is required.
 
@@ -357,34 +321,21 @@ Threading:
 
 - `nemo_set_threads()` controls a persistent worker pool, capped at 16 threads.
 - The CLI defaults to all online CPUs and accepts `-t N`.
-- Large `nemo_linear`, `nemo_matvec_f32`, and `nemo_argmax_matvec_f32` calls are
-  split across output rows.
+- Large dense calls are split across output rows.
 - Small operations stay single-threaded to avoid scheduling overhead.
-- BF16 linear weights are consumed directly instead of being expanded into a
-  full float32 side buffer.
 - W8A8 linear weights are consumed directly from the mmap'd packed int8 payload
   and use dynamic per-vector activation quantization.
 - Single-row W8A8 calls share one prequantized activation buffer across output
   worker threads; multi-row encoder calls keep per-worker stack quantization to
   avoid an extra synchronization point.
-- NEON and AVX2 compute BF16 matvecs and classifier argmax ranges two output
-  rows at a time to reuse input vector loads.
-- AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
-  at a time.
 - Q8P matvec and classifier argmax use four-output-row packed int8 tiles with a
   16-byte padded stride in the generic, NEON, and AVX2 backends.
-- `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
-  on the native kernels.
 
 Example JFK sample timing on an 8-core Apple Silicon laptop:
 
 | build/options | inference | realtime |
 |---------------|-----------|----------|
-| native fp32, `-t 1` | 10.54 s | 1.04x |
-| native fp32, `-t 8` | 9.65 s | 1.14x |
-| native BF16 linear, `-t 8` | 4.34 s | 2.53x |
-| native W8A8 Q8P linear, `-t 8` | 1.92 s | 5.73x |
-| generic fp32, `-t 8` | 6.21 s | 1.77x |
+| native W8A8 Q8P linear, `-t 8` | 1.57 s | 7.03x |
 
 ## Smoke Checks
 
@@ -396,13 +347,6 @@ make bench-kernels
 make check-arch-syntax
 
 ./nemotron_asr \
-  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
-  -i ../qwen-asr/samples/jfk.wav \
-  -l en-US \
-  --strip-tags \
-  -t 8
-
-./nemotron_asr \
   -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   -i ../qwen-asr/samples/jfk.wav \
   -l en-US \
@@ -411,7 +355,7 @@ make check-arch-syntax
 
 make generic
 ./nemotron_asr \
-  -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   -i ../qwen-asr/samples/jfk.wav \
   -l en-US \
   --strip-tags \
@@ -436,7 +380,7 @@ See `MODEL.md` for the tensor mapping and kernel-priority analysis.
 ## API Sketch
 
 ```c
-nemo_ctx_t *ctx = nemo_load("nemotron-3.5-asr-streaming-0.6b.bin");
+nemo_ctx_t *ctx = nemo_load("nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin");
 nemo_set_language(ctx, "ko-KR");
 ctx->att_right = 3;
 ctx->strip_lang_tags = 1;
@@ -460,7 +404,7 @@ Lower-level streaming pieces are also exposed:
 
 ```bash
 ./nemotron_asr_mic --list-devices
-./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin --device 1 --meter
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --device 1 --meter
 ```
 
 Check macOS microphone permission for the app you launch from, such as Terminal,

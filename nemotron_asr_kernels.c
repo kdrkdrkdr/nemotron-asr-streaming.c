@@ -159,12 +159,7 @@ static int nemo_weight_is_bf16(const nemo_weight_t *w) {
 }
 
 static int nemo_weight_is_q8(const nemo_weight_t *w) {
-    return w && (w->dtype == NEMO_TENSOR_Q8 || w->dtype == NEMO_TENSOR_Q8P) &&
-           w->q8 && w->q8_scales;
-}
-
-static int nemo_weight_q8_packed(const nemo_weight_t *w) {
-    return w && (w->dtype == NEMO_TENSOR_Q8P || w->q8_packed);
+    return w && w->dtype == NEMO_TENSOR_Q8P && w->q8 && w->q8_scales;
 }
 
 static int nemo_weight_q8_stride(const nemo_weight_t *w, int fallback) {
@@ -262,12 +257,6 @@ static void nemo_q8_prequant_rows(const float *x, int8_t *x_q8, float *x_scales,
     }
 }
 
-static int32_t nemo_dot_i8_i8_scalar(const int8_t *a, const int8_t *b, int n) {
-    int32_t sum = 0;
-    for (int i = 0; i < n; i++) sum += (int32_t)a[i] * (int32_t)b[i];
-    return sum;
-}
-
 static const int8_t *nemo_q8p_row_block(const int8_t *w, int row, int stride, int k) {
     int tile = row >> 2;
     int lane = row & 3;
@@ -292,19 +281,15 @@ static int8_t nemo_q8p_value(const int8_t *w, int row, int stride, int col) {
 static float nemo_q8_dot_quantized_row(const int8_t *x_q8, float x_scale,
                                        const nemo_weight_t *w, int row,
                                        int stride, int n) {
-    int32_t acc;
-    if (nemo_weight_q8_packed(w)) {
-        int q8_stride = nemo_weight_q8_stride(w, stride);
-        acc = nemo_dot_i8_i8_packed_scalar(x_q8, w->q8, row, q8_stride);
-    } else {
-        acc = nemo_dot_i8_i8_scalar(x_q8, w->q8 + (size_t)row * stride, n);
-    }
+    (void)n;
+    int q8_stride = nemo_weight_q8_stride(w, stride);
+    int32_t acc = nemo_dot_i8_i8_packed_scalar(x_q8, w->q8, row, q8_stride);
     return (float)acc * x_scale * w->q8_scales[row];
 }
 
 static float nemo_q8_dot_row(const float *x, const nemo_weight_t *w, int row, int stride, int n) {
     int8_t stack_q8[NEMO_Q8_STACK_MAX];
-    int q8_stride = nemo_weight_q8_packed(w) ? nemo_weight_q8_stride(w, stride) : n;
+    int q8_stride = nemo_weight_q8_stride(w, stride);
     int8_t *x_q8 = nemo_q8_tmp_alloc(q8_stride, stack_q8);
     if (!x_q8) return 0.0f;
     float x_scale = nemo_quantize_q8_symmetric_padded(x, x_q8, n, q8_stride);
@@ -327,9 +312,7 @@ static float nemo_weight_value_row(const nemo_weight_t *w, int row, int stride, 
     size_t idx = (size_t)row * stride + col;
     if (nemo_weight_is_bf16(w)) return nemo_bf16_to_f32(w->bf16[idx]);
     if (nemo_weight_is_q8(w)) {
-        int8_t qv = nemo_weight_q8_packed(w) ?
-                    nemo_q8p_value(w->q8, row, nemo_weight_q8_stride(w, stride), col) :
-                    w->q8[idx];
+        int8_t qv = nemo_q8p_value(w->q8, row, nemo_weight_q8_stride(w, stride), col);
         return (float)qv * w->q8_scales[row];
     }
     return w->f32[idx];
@@ -435,26 +418,17 @@ static void nemo_q8_linear_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int q8_stride = nemo_weight_q8_packed(t->w) ? nemo_weight_q8_stride(t->w, t->in_dim) : t->in_dim;
+    int q8_stride = nemo_weight_q8_stride(t->w, t->in_dim);
     int8_t stack_q8[NEMO_Q8_STACK_MAX];
     int8_t *x_q8 = nemo_q8_tmp_alloc(q8_stride, stack_q8);
     if (!x_q8) return;
     for (int r = 0; r < t->rows; r++) {
         const float *xr = t->x + (size_t)r * t->in_dim;
         float x_scale = nemo_quantize_q8_symmetric_padded(xr, x_q8, t->in_dim, q8_stride);
-        if (nemo_weight_q8_packed(t->w)) {
-            nemo_q8p_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w->q8, t->w->q8_scales,
-                                       t->b ? t->b + start : NULL,
-                                       q8_stride, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale,
-                                      t->w->q8 + (size_t)start * t->in_dim,
-                                      t->w->q8_scales + start,
-                                      t->b ? t->b + start : NULL,
-                                      t->in_dim, end - start);
-        }
+        nemo_q8p_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w->q8, t->w->q8_scales,
+                                   t->b ? t->b + start : NULL,
+                                   q8_stride, start, end - start);
     }
     nemo_q8_tmp_free(x_q8, stack_q8);
 }
@@ -467,19 +441,10 @@ static void nemo_q8_linear_preq_worker(int tid, int n_threads, void *arg) {
     for (int r = 0; r < t->rows; r++) {
         const int8_t *x_q8 = t->x_q8 + (size_t)r * t->q8_stride;
         float x_scale = t->x_scales[r];
-        if (nemo_weight_q8_packed(t->w)) {
-            nemo_q8p_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w->q8, t->w->q8_scales,
-                                       t->b ? t->b + start : NULL,
-                                       t->q8_stride, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale,
-                                      t->w->q8 + (size_t)start * t->in_dim,
-                                      t->w->q8_scales + start,
-                                      t->b ? t->b + start : NULL,
-                                      t->in_dim, end - start);
-        }
+        nemo_q8p_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w->q8, t->w->q8_scales,
+                                   t->b ? t->b + start : NULL,
+                                   t->q8_stride, start, end - start);
     }
 }
 
@@ -613,9 +578,9 @@ static void nemo_q8_linear3_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int q8_stride0 = nemo_weight_q8_packed(t->w0) ? nemo_weight_q8_stride(t->w0, t->in_dim) : t->in_dim;
-    int q8_stride1 = nemo_weight_q8_packed(t->w1) ? nemo_weight_q8_stride(t->w1, t->in_dim) : t->in_dim;
-    int q8_stride2 = nemo_weight_q8_packed(t->w2) ? nemo_weight_q8_stride(t->w2, t->in_dim) : t->in_dim;
+    int q8_stride0 = nemo_weight_q8_stride(t->w0, t->in_dim);
+    int q8_stride1 = nemo_weight_q8_stride(t->w1, t->in_dim);
+    int q8_stride2 = nemo_weight_q8_stride(t->w2, t->in_dim);
     int q8_stride = q8_stride0;
     if (q8_stride1 > q8_stride) q8_stride = q8_stride1;
     if (q8_stride2 > q8_stride) q8_stride = q8_stride2;
@@ -625,33 +590,15 @@ static void nemo_q8_linear3_worker(int tid, int n_threads, void *arg) {
     for (int r = 0; r < t->rows; r++) {
         const float *xr = t->x + (size_t)r * t->in_dim;
         float x_scale = nemo_quantize_q8_symmetric_padded(xr, x_q8, t->in_dim, q8_stride);
-        if (nemo_weight_q8_packed(t->w0)) {
-            nemo_q8p_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w0->q8, t->w0->q8_scales,
-                                       NULL, q8_stride0, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w0->q8 + (size_t)start * t->in_dim,
-                                      t->w0->q8_scales + start, NULL, t->in_dim, end - start);
-        }
-        if (nemo_weight_q8_packed(t->w1)) {
-            nemo_q8p_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w1->q8, t->w1->q8_scales,
-                                       NULL, q8_stride1, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w1->q8 + (size_t)start * t->in_dim,
-                                      t->w1->q8_scales + start, NULL, t->in_dim, end - start);
-        }
-        if (nemo_weight_q8_packed(t->w2)) {
-            nemo_q8p_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w2->q8, t->w2->q8_scales,
-                                       NULL, q8_stride2, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w2->q8 + (size_t)start * t->in_dim,
-                                      t->w2->q8_scales + start, NULL, t->in_dim, end - start);
-        }
+        nemo_q8p_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w0->q8, t->w0->q8_scales,
+                                   NULL, q8_stride0, start, end - start);
+        nemo_q8p_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w1->q8, t->w1->q8_scales,
+                                   NULL, q8_stride1, start, end - start);
+        nemo_q8p_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w2->q8, t->w2->q8_scales,
+                                   NULL, q8_stride2, start, end - start);
     }
     nemo_q8_tmp_free(x_q8, stack_q8);
 }
@@ -664,33 +611,15 @@ static void nemo_q8_linear3_preq_worker(int tid, int n_threads, void *arg) {
     for (int r = 0; r < t->rows; r++) {
         const int8_t *x_q8 = t->x_q8 + (size_t)r * t->q8_stride;
         float x_scale = t->x_scales[r];
-        if (nemo_weight_q8_packed(t->w0)) {
-            nemo_q8p_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w0->q8, t->w0->q8_scales,
-                                       NULL, t->q8_stride0, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w0->q8 + (size_t)start * t->in_dim,
-                                      t->w0->q8_scales + start, NULL, t->in_dim, end - start);
-        }
-        if (nemo_weight_q8_packed(t->w1)) {
-            nemo_q8p_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w1->q8, t->w1->q8_scales,
-                                       NULL, t->q8_stride1, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w1->q8 + (size_t)start * t->in_dim,
-                                      t->w1->q8_scales + start, NULL, t->in_dim, end - start);
-        }
-        if (nemo_weight_q8_packed(t->w2)) {
-            nemo_q8p_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
-                                       x_q8, x_scale, t->w2->q8, t->w2->q8_scales,
-                                       NULL, t->q8_stride2, start, end - start);
-        } else {
-            nemo_q8_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
-                                      x_q8, x_scale, t->w2->q8 + (size_t)start * t->in_dim,
-                                      t->w2->q8_scales + start, NULL, t->in_dim, end - start);
-        }
+        nemo_q8p_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w0->q8, t->w0->q8_scales,
+                                   NULL, t->q8_stride0, start, end - start);
+        nemo_q8p_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w1->q8, t->w1->q8_scales,
+                                   NULL, t->q8_stride1, start, end - start);
+        nemo_q8p_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
+                                   x_q8, x_scale, t->w2->q8, t->w2->q8_scales,
+                                   NULL, t->q8_stride2, start, end - start);
     }
 }
 
@@ -766,7 +695,7 @@ static void nemo_argmax_weight_worker(int tid, int n_threads, void *arg) {
     }
     if (nemo_weight_is_q8(t->w)) {
         int8_t stack_q8[NEMO_Q8_STACK_MAX];
-        int q8_stride = nemo_weight_q8_packed(t->w) ? nemo_weight_q8_stride(t->w, t->in_dim) : t->in_dim;
+        int q8_stride = nemo_weight_q8_stride(t->w, t->in_dim);
         const int8_t *x_q8 = t->x_q8;
         float x_scale = t->x_scale;
         int8_t *tmp_q8 = NULL;
@@ -782,17 +711,10 @@ static void nemo_argmax_weight_worker(int tid, int n_threads, void *arg) {
             t->best_val[tid] = -3.4028234663852886e38f;
             return;
         }
-        if (nemo_weight_q8_packed(t->w)) {
-            t->best[tid] = nemo_argmax_q8p_range_impl(x_q8, x_scale,
-                                                      t->w->q8, t->w->q8_scales, t->b,
-                                                      q8_stride, start, end,
-                                                      &t->best_val[tid]);
-        } else {
-            t->best[tid] = nemo_argmax_q8_range_impl(x_q8, x_scale,
-                                                     t->w->q8, t->w->q8_scales, t->b,
-                                                     t->in_dim, start, end,
-                                                     &t->best_val[tid]);
-        }
+        t->best[tid] = nemo_argmax_q8p_range_impl(x_q8, x_scale,
+                                                  t->w->q8, t->w->q8_scales, t->b,
+                                                  q8_stride, start, end,
+                                                  &t->best_val[tid]);
         if (tmp_q8) nemo_q8_tmp_free(tmp_q8, stack_q8);
         return;
     }
@@ -922,7 +844,7 @@ static void nemo_prompt_q8_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int q8_stride = nemo_weight_q8_packed(t->w) ? nemo_weight_q8_stride(t->w, stride) : t->in_dim;
+    int q8_stride = nemo_weight_q8_stride(t->w, stride);
     int8_t stack_q8[NEMO_Q8_STACK_MAX];
     int8_t *x_q8 = nemo_q8_tmp_alloc(q8_stride, stack_q8);
     if (!x_q8) return;
@@ -972,8 +894,8 @@ static void nemo_lstm_gates_q8_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int x_q8_stride = nemo_weight_q8_packed(t->w_ih) ? nemo_weight_q8_stride(t->w_ih, t->dim) : t->dim;
-    int h_q8_stride = nemo_weight_q8_packed(t->w_hh) ? nemo_weight_q8_stride(t->w_hh, t->dim) : t->dim;
+    int x_q8_stride = nemo_weight_q8_stride(t->w_ih, t->dim);
+    int h_q8_stride = nemo_weight_q8_stride(t->w_hh, t->dim);
     int8_t stack_x_q8[NEMO_Q8_STACK_MAX];
     int8_t stack_h_q8[NEMO_Q8_STACK_MAX];
     int8_t *x_q8 = nemo_q8_tmp_alloc(x_q8_stride, stack_x_q8);
@@ -1067,7 +989,7 @@ void nemo_linear_weight(float *y, const float *x, const nemo_weight_t *w, const 
         nemo_q8_linear_task_t task = {y, x, w, b, rows, in_dim, out_dim};
         if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
             if (rows == 1) {
-                int q8_stride = nemo_weight_q8_packed(w) ? nemo_weight_q8_stride(w, in_dim) : in_dim;
+                int q8_stride = nemo_weight_q8_stride(w, in_dim);
                 int8_t stack_q8[NEMO_Q8_PREQ_STACK_MAX];
                 float stack_scales[NEMO_Q8_SCALE_STACK_MAX];
                 int8_t *x_q8 = q8_stride <= NEMO_Q8_PREQ_STACK_MAX ? stack_q8 : (int8_t *)malloc((size_t)q8_stride);
@@ -1142,9 +1064,9 @@ void nemo_linear3_nobias_weight(float *y0, float *y1, float *y2, const float *x,
         nemo_q8_linear3_task_t task = {y0, y1, y2, x, w0, w1, w2, rows, in_dim, out_dim};
         if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
             if (rows == 1) {
-                int q8_stride0 = nemo_weight_q8_packed(w0) ? nemo_weight_q8_stride(w0, in_dim) : in_dim;
-                int q8_stride1 = nemo_weight_q8_packed(w1) ? nemo_weight_q8_stride(w1, in_dim) : in_dim;
-                int q8_stride2 = nemo_weight_q8_packed(w2) ? nemo_weight_q8_stride(w2, in_dim) : in_dim;
+                int q8_stride0 = nemo_weight_q8_stride(w0, in_dim);
+                int q8_stride1 = nemo_weight_q8_stride(w1, in_dim);
+                int q8_stride2 = nemo_weight_q8_stride(w2, in_dim);
                 int q8_stride = q8_stride0;
                 if (q8_stride1 > q8_stride) q8_stride = q8_stride1;
                 if (q8_stride2 > q8_stride) q8_stride = q8_stride2;
@@ -1383,7 +1305,7 @@ int nemo_argmax_matvec_weight(const float *x, const nemo_weight_t *w, const floa
         int8_t stack_q8[NEMO_Q8_STACK_MAX];
         int8_t *x_q8 = NULL;
         if (nemo_weight_is_q8(w)) {
-            int q8_stride = nemo_weight_q8_packed(w) ? nemo_weight_q8_stride(w, in_dim) : in_dim;
+            int q8_stride = nemo_weight_q8_stride(w, in_dim);
             x_q8 = nemo_q8_tmp_alloc(q8_stride, stack_q8);
             if (x_q8) {
                 task.x_q8 = x_q8;
