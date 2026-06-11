@@ -85,6 +85,8 @@ Current SIMD backends should therefore prioritize:
   `nemo_argmax_matvec_weight` for direct BF16 linear weights
 - BF16 dense helpers: `nemo_dot_bf16_f32_impl`,
   `nemo_bf16_matvec_fused_impl`, and `nemo_argmax_bf16_range_impl`
+- W8A8 dense helpers: `nemo_q8_matvec_fused_impl` and
+  `nemo_argmax_q8_range_impl`
 
 CPU engine optimizations now mirror the useful qwen-asr patterns that apply to
 Nemotron's graph:
@@ -94,8 +96,13 @@ Nemotron's graph:
 - threaded `nemo_matvec_f32` and `nemo_argmax_matvec_f32`
 - optional BF16 model conversion for dense linear, LSTM, and joint classifier
   weights, consumed directly without expanding a full float32 copy
+- experimental W8A8 model conversion for the same dense weights, stored as
+  per-row int8 plus float32 row scales and consumed directly from the mmap'd
+  model file
 - architecture-dispatched BF16 row dot, matvec, and classifier argmax range
   for those typed dense weights
+- architecture-dispatched Q8 matvec and classifier argmax range for linear-only
+  W8A8 experiments
 - fused `nemo_linear3_nobias` for encoder Q/K/V projection
 - threaded `nemo_prompt_linear_relu` for language prompt projection
 - fused `nemo_lstm_gates_f32` for RNN-T prediction-network gate projection
@@ -118,6 +125,14 @@ by the typed linear/matvec wrappers. Biases, layer-norm parameters, depthwise
 convolution filters, mel front-end tensors, and the prediction embedding remain
 float32.
 
+The W8A8 path follows the same boundary. It quantizes dense linear-family
+weights offline with one scale per output row. At runtime, each input vector is
+quantized symmetrically to int8 immediately before the typed matvec, the dot
+product accumulates into int32, and the result is dequantized back to float32.
+The rest of the graph stays float32. This keeps the original streaming model
+structure intact while making the dominant dense operations cheaper to load and
+compute.
+
 Backend-specific BF16 coverage:
 
 - generic C: reference BF16 row dot, matvec, and classifier argmax range
@@ -125,6 +140,18 @@ Backend-specific BF16 coverage:
 - AVX2/FMA: BF16 row dot plus two-output-row matvec and classifier argmax range
 - AVX512F+BW: 16-lane BF16 conversion plus four-output-row matvec and
   classifier argmax range
+
+Backend-specific W8A8 coverage:
+
+- generic C: scalar int8 dot plus four-output-row matvec and classifier argmax
+  tiles
+- NEON: signed int8 dot-product path with four-output-row matvec and classifier
+  argmax tiles when `__ARM_FEATURE_DOTPROD` is available
+- AVX2/FMA: signed int8 dot via int8->int16 widening and `madd_epi16`, with
+  four-output-row matvec and classifier argmax tiles
+- AVX-VNNI-INT8: direct signed*signed int8 dot-product tiles
+- AVX-VNNI and AVX512-VNNI: unsigned*signed dot-product instructions with a
+  correction term to preserve signed*signed int8 semantics
 
 The row grouping matters for this model because dense operations are mostly
 streaming matvecs. Reusing each loaded input vector across two or four output

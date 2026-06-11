@@ -24,6 +24,7 @@ MAGIC = b"NM35ASR\0"
 VERSION = 1
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
+DTYPE_Q8 = 3
 
 
 def align64(f):
@@ -99,6 +100,10 @@ def should_write_bf16(key: str, tensor: torch.Tensor, enabled: bool) -> bool:
     return False
 
 
+def should_write_q8(key: str, tensor: torch.Tensor, enabled: bool) -> bool:
+    return should_write_bf16(key, tensor, enabled)
+
+
 def tensor_bf16_bytes(tensor: torch.Tensor) -> bytes:
     arr = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
     bits = arr.view(np.uint32)
@@ -107,7 +112,24 @@ def tensor_bf16_bytes(tensor: torch.Tensor) -> bytes:
     return bf16.tobytes(order="C")
 
 
-def write_model(out_path: Path, cfg: dict, state: dict, bf16_linear_weights: bool = False):
+def tensor_q8_bytes(tensor: torch.Tensor) -> bytes:
+    arr = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
+    if arr.ndim == 0:
+        raise ValueError("cannot q8-quantize scalar tensor")
+    rows = int(arr.shape[0])
+    flat = arr.reshape(rows, -1)
+    max_abs = np.max(np.abs(flat), axis=1)
+    scales = (max_abs / 127.0).astype("<f4", copy=False)
+    safe_scales = scales.copy()
+    safe_scales[safe_scales == 0.0] = 1.0
+    q = np.rint(flat / safe_scales[:, None])
+    q = np.clip(q, -127, 127).astype(np.int8, copy=False)
+    return scales.tobytes(order="C") + q.tobytes(order="C")
+
+
+def write_model(out_path: Path, cfg: dict, state: dict,
+                bf16_linear_weights: bool = False,
+                w8a8_linear_weights: bool = False):
     vocab = list(cfg["joint"]["vocabulary"])
     keys = list(state.keys())
     with out_path.open("wb") as f:
@@ -122,7 +144,10 @@ def write_model(out_path: Path, cfg: dict, state: dict, bf16_linear_weights: boo
                 raise ValueError(f"tensor name too long: {key}")
             dims = list(tensor.shape)
             dims4 = dims + [1] * (4 - len(dims))
-            if should_write_bf16(key, tensor, bf16_linear_weights):
+            if should_write_q8(key, tensor, w8a8_linear_weights):
+                dtype = DTYPE_Q8
+                raw = tensor_q8_bytes(tensor)
+            elif should_write_bf16(key, tensor, bf16_linear_weights):
                 dtype = DTYPE_BF16
                 raw = tensor_bf16_bytes(tensor)
             else:
@@ -149,16 +174,20 @@ def main():
     ap.add_argument("--work-dir", type=Path, default=None, help="Reuse/extract into this directory")
     ap.add_argument("--bf16-linear-weights", action="store_true",
                     help="Store dense linear/RNN-T classifier weights as BF16")
+    ap.add_argument("--w8a8-linear-weights", action="store_true",
+                    help="Store dense linear/RNN-T classifier weights as per-row int8 for experimental W8A8 inference")
     args = ap.parse_args()
+    if args.bf16_linear_weights and args.w8a8_linear_weights:
+        raise SystemExit("--bf16-linear-weights and --w8a8-linear-weights are mutually exclusive")
 
     if args.work_dir:
         args.work_dir.mkdir(parents=True, exist_ok=True)
         cfg, state = load_nemo(args.nemo, args.work_dir)
-        write_model(args.output, cfg, state, args.bf16_linear_weights)
+        write_model(args.output, cfg, state, args.bf16_linear_weights, args.w8a8_linear_weights)
     else:
         with tempfile.TemporaryDirectory(prefix="nemotron_nemo_") as td:
             cfg, state = load_nemo(args.nemo, Path(td))
-            write_model(args.output, cfg, state, args.bf16_linear_weights)
+            write_model(args.output, cfg, state, args.bf16_linear_weights, args.w8a8_linear_weights)
 
     size_gb = os.path.getsize(args.output) / (1024**3)
     print(f"wrote {args.output} ({size_gb:.2f} GiB)")

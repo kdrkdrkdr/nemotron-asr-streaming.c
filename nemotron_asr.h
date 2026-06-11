@@ -38,6 +38,8 @@ typedef struct {
     const char *name;
     const float *data;
     const uint16_t *data_bf16;
+    const int8_t *data_q8;
+    const float *q8_scales;
     uint8_t dtype;
     uint32_t ndims;
     uint64_t dims[4];

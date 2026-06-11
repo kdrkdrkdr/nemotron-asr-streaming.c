@@ -50,6 +50,8 @@ Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not
 For normal use, prefer the BF16 linear file. It keeps normalization, bias,
 convolution, mel, and embedding tensors in float32, but stores dense linear and
 classifier weights as BF16 so the runtime can skip a large float32 expansion.
+The `w8a8` branch also includes an experimental linear-weight W8A8 path for
+smaller model files and faster CPU experiments.
 
 ## Features
 
@@ -58,6 +60,9 @@ classifier weights as BF16 so the runtime can skip a large float32 expansion.
   tensor stream.
 - **Mixed BF16 linear weights**: optional converter path stores dense linear,
   LSTM, and vocabulary classifier weights as BF16 and runs them directly.
+- **Experimental W8A8 linear weights**: optional converter path stores the same
+  dense weights as per-row int8 and dynamically quantizes activations for int8
+  dot-product inference.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
   cache-aware `att_context_size` right context.
 - **Incremental front end**: audio samples and mel frames are accepted
@@ -116,6 +121,15 @@ python3 tools/convert_nemo.py \
   --bf16-linear-weights
 ```
 
+Experimental W8A8 linear-weight file:
+
+```bash
+python3 tools/convert_nemo.py \
+  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
+  -o nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
+  --w8a8-linear-weights
+```
+
 The converter reads:
 
 - `model_config.yaml`
@@ -126,7 +140,11 @@ It writes a little-endian `.bin` file containing 64-byte-aligned tensor payloads
 followed by vocabulary strings. By default all tensors are float32. With
 `--bf16-linear-weights`, dense encoder, prompt, RNN-T prediction, and joint
 classifier weights are written as BF16 while normalization, bias, convolution,
-mel, and embedding tensors remain float32.
+mel, and embedding tensors remain float32. With `--w8a8-linear-weights`, those
+dense weights are written as per-output-row int8 plus float32 row scales.
+Activations remain float32 in the graph and are quantized to int8 only at typed
+linear/matvec call sites. The BF16 and W8A8 converter options are mutually
+exclusive.
 
 ## WAV Usage
 
@@ -306,20 +324,24 @@ The public kernel surface covers the current hot path:
 - `nemo_lstm_gates_f32` for fused RNN-T prediction LSTM gates
 - typed-weight variants such as `nemo_linear_weight`,
   `nemo_linear3_nobias_weight`, and `nemo_argmax_matvec_weight` for direct
-  f32/BF16 dispatch
+  f32/BF16/Q8 dispatch
 
 Backends:
 
-- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32 and BF16 dense
-  paths.
+- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32, BF16, and Q8
+  dense paths.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec, attention score, residual axpy, and
-  pointwise streaming preconv.
+  pointwise streaming preconv. Q8 matvec/argmax uses NEON dot-product when the
+  target provides `__ARM_FEATURE_DOTPROD`.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, and pointwise streaming preconv.
+  axpy, pointwise streaming preconv, and Q8 matvec/argmax.
 - `nemotron_asr_kernels_avx.c` on AVX512F+BW: 16-lane BF16 conversion plus
   four-output-row BF16 matvec/argmax range.
+- `nemotron_asr_kernels_avx.c` with AVX-VNNI, AVX-VNNI-INT8, or AVX512-VNNI:
+  Q8 dot-product paths use the available VNNI family instruction shape, with a
+  signed-int8 correction where the hardware exposes unsigned*signed dot only.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -333,10 +355,14 @@ Threading:
 - Small operations stay single-threaded to avoid scheduling overhead.
 - BF16 linear weights are consumed directly instead of being expanded into a
   full float32 side buffer.
+- W8A8 linear weights are consumed directly from the mmap'd int8 payload and
+  use dynamic per-vector activation quantization.
 - NEON and AVX2 compute BF16 matvecs two output rows at a time to reuse input
   vector loads.
 - AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
   at a time.
+- Q8 matvec and classifier argmax use four-output-row dot-product tiles in the
+  generic, NEON, and AVX backends.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -347,6 +373,7 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | native, `-t 1` | 9.65 s | 1.14x |
 | native, `-t 8` | 3.60 s | 3.06x |
 | native, BF16 linear, `-t 8` | 2.16 s | 5.10x |
+| native, W8A8 linear, `-t 8` | 1.39 s | 7.92x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
 | generic, BF16 linear, `-t 8` | 3.41 s | 3.22x |
@@ -359,6 +386,13 @@ make clean && make
 
 ./nemotron_asr \
   -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \
+  -i ../qwen-asr/samples/jfk.wav \
+  -l en-US \
+  --strip-tags \
+  -t 8
+
+./nemotron_asr \
+  -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
   -i ../qwen-asr/samples/jfk.wav \
   -l en-US \
   --strip-tags \

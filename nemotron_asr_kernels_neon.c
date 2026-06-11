@@ -168,6 +168,134 @@ int nemo_argmax_bf16_range_neon(const float *x, const uint16_t *w, const float *
     return best;
 }
 
+static inline int32_t dot_i8_neon_inline(const int8_t *a, const int8_t *b, int n) {
+    int i = 0;
+    int32_t sum = 0;
+#if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+    int32x4_t acc0 = vdupq_n_s32(0);
+    int32x4_t acc1 = vdupq_n_s32(0);
+    for (; i + 32 <= n; i += 32) {
+        acc0 = vdotq_s32(acc0, vld1q_s8(a + i), vld1q_s8(b + i));
+        acc1 = vdotq_s32(acc1, vld1q_s8(a + i + 16), vld1q_s8(b + i + 16));
+    }
+    for (; i + 16 <= n; i += 16) {
+        acc0 = vdotq_s32(acc0, vld1q_s8(a + i), vld1q_s8(b + i));
+    }
+    sum = vaddvq_s32(vaddq_s32(acc0, acc1));
+#endif
+    for (; i < n; i++) {
+        sum += (int32_t)a[i] * (int32_t)b[i];
+    }
+    return sum;
+}
+
+static inline void dot4_i8_neon_inline(const int8_t *x,
+                                       const int8_t *w0, const int8_t *w1,
+                                       const int8_t *w2, const int8_t *w3,
+                                       int n, int32_t *s0_out,
+                                       int32_t *s1_out, int32_t *s2_out,
+                                       int32_t *s3_out) {
+    int i = 0;
+    int32_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+#if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+    int32x4_t a0 = vdupq_n_s32(0);
+    int32x4_t a1 = vdupq_n_s32(0);
+    int32x4_t a2 = vdupq_n_s32(0);
+    int32x4_t a3 = vdupq_n_s32(0);
+    for (; i + 16 <= n; i += 16) {
+        int8x16_t xv = vld1q_s8(x + i);
+        a0 = vdotq_s32(a0, xv, vld1q_s8(w0 + i));
+        a1 = vdotq_s32(a1, xv, vld1q_s8(w1 + i));
+        a2 = vdotq_s32(a2, xv, vld1q_s8(w2 + i));
+        a3 = vdotq_s32(a3, xv, vld1q_s8(w3 + i));
+    }
+    s0 = vaddvq_s32(a0);
+    s1 = vaddvq_s32(a1);
+    s2 = vaddvq_s32(a2);
+    s3 = vaddvq_s32(a3);
+#endif
+    for (; i < n; i++) {
+        int32_t xv = x[i];
+        s0 += xv * (int32_t)w0[i];
+        s1 += xv * (int32_t)w1[i];
+        s2 += xv * (int32_t)w2[i];
+        s3 += xv * (int32_t)w3[i];
+    }
+    *s0_out = s0;
+    *s1_out = s1;
+    *s2_out = s2;
+    *s3_out = s3;
+}
+
+void nemo_q8_matvec_fused_neon(float *y, const int8_t *x_q8, float x_scale,
+                               const int8_t *w, const float *w_scales,
+                               const float *b, int in_dim, int out_dim) {
+    int o = 0;
+    for (; o + 3 < out_dim; o += 4) {
+        const int8_t *w0 = w + (size_t)o * in_dim;
+        const int8_t *w1 = w0 + in_dim;
+        const int8_t *w2 = w1 + in_dim;
+        const int8_t *w3 = w2 + in_dim;
+        int32_t s0, s1, s2, s3;
+        dot4_i8_neon_inline(x_q8, w0, w1, w2, w3, in_dim, &s0, &s1, &s2, &s3);
+        y[o] = (float)s0 * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        y[o + 1] = (float)s1 * x_scale * w_scales[o + 1] + (b ? b[o + 1] : 0.0f);
+        y[o + 2] = (float)s2 * x_scale * w_scales[o + 2] + (b ? b[o + 2] : 0.0f);
+        y[o + 3] = (float)s3 * x_scale * w_scales[o + 3] + (b ? b[o + 3] : 0.0f);
+    }
+    for (; o < out_dim; o++) {
+        int32_t acc = dot_i8_neon_inline(x_q8, w + (size_t)o * in_dim, in_dim);
+        y[o] = (float)acc * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+    }
+}
+
+int nemo_argmax_q8_range_neon(const int8_t *x_q8, float x_scale,
+                              const int8_t *w, const float *w_scales,
+                              const float *b, int in_dim, int start, int end,
+                              float *best_val_out) {
+    int best = start;
+    float best_val = -3.4028234663852886e38f;
+    int o = start;
+    for (; o + 3 < end; o += 4) {
+        const int8_t *w0 = w + (size_t)o * in_dim;
+        const int8_t *w1 = w0 + in_dim;
+        const int8_t *w2 = w1 + in_dim;
+        const int8_t *w3 = w2 + in_dim;
+        int32_t s0, s1, s2, s3;
+        dot4_i8_neon_inline(x_q8, w0, w1, w2, w3, in_dim, &s0, &s1, &s2, &s3);
+        float v0 = (float)s0 * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        float v1 = (float)s1 * x_scale * w_scales[o + 1] + (b ? b[o + 1] : 0.0f);
+        float v2 = (float)s2 * x_scale * w_scales[o + 2] + (b ? b[o + 2] : 0.0f);
+        float v3 = (float)s3 * x_scale * w_scales[o + 3] + (b ? b[o + 3] : 0.0f);
+        if (v0 > best_val) {
+            best_val = v0;
+            best = o;
+        }
+        if (v1 > best_val) {
+            best_val = v1;
+            best = o + 1;
+        }
+        if (v2 > best_val) {
+            best_val = v2;
+            best = o + 2;
+        }
+        if (v3 > best_val) {
+            best_val = v3;
+            best = o + 3;
+        }
+    }
+    for (; o < end; o++) {
+        int32_t acc = dot_i8_neon_inline(x_q8, w + (size_t)o * in_dim, in_dim);
+        float v = (float)acc * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    if (best_val_out) *best_val_out = best_val;
+    return best;
+}
+
 float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const float *k,
                                     const float *bias_v, const float *p, int n) {
     int i = 0;
