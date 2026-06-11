@@ -95,7 +95,7 @@ make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
 make check-kernels  # compare native BF16/Q8 kernels against generic C
-make bench-kernels  # microbenchmark generic/native BF16/Q8 matvecs
+make bench-kernels  # microbenchmark generic/native BF16/Q8 matvec/argmax paths
 make check-arch-syntax  # syntax-check NEON and AVX/VNNI kernel variants
 make clean
 ```
@@ -106,7 +106,8 @@ Otherwise it uses the generic C backend. `make blas` is optional; the normal
 build does not require BLAS. `make check-arch-syntax` is a clang-oriented
 cross-syntax check for the architecture-specific kernel files. `make
 bench-kernels` measures generic and native backend speed for representative
-dense shapes such as FFN, attention, and joint vocabulary projections.
+dense matvec and classifier argmax shapes such as FFN, attention, and joint
+vocabulary projections.
 
 ## Convert Model
 
@@ -337,9 +338,9 @@ Backends:
 - `nemotron_asr_kernels_generic.c`: scalar C fallback for f32, BF16, and Q8
   dense paths.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
-  BF16 row dot, two-row BF16 matvec, attention score, residual axpy, and
-  pointwise streaming preconv. Q8 matvec/argmax uses NEON dot-product when the
-  target provides `__ARM_FEATURE_DOTPROD`.
+  BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
+  axpy, and pointwise streaming preconv. Q8 matvec/argmax uses NEON dot-product
+  when the target provides `__ARM_FEATURE_DOTPROD`.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
   axpy, pointwise streaming preconv, and Q8 matvec/argmax.
@@ -363,8 +364,8 @@ Threading:
   full float32 side buffer.
 - W8A8 linear weights are consumed directly from the mmap'd int8 payload and
   use dynamic per-vector activation quantization.
-- NEON and AVX2 compute BF16 matvecs two output rows at a time to reuse input
-  vector loads.
+- NEON and AVX2 compute BF16 matvecs and classifier argmax ranges two output
+  rows at a time to reuse input vector loads.
 - AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
   at a time.
 - Q8 matvec and classifier argmax use four-output-row dot-product tiles in the

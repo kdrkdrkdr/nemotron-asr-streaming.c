@@ -104,6 +104,56 @@ static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
     return 0;
 }
 
+static int bench_q8_argmax(const char *name, int in_dim, int out_dim, int iters) {
+    int8_t *x = (int8_t *)malloc((size_t)in_dim);
+    int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
+    float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
+    if (!x || !w || !scales || !bias) {
+        fprintf(stderr, "allocation failed in q8 argmax bench\n");
+        free(x);
+        free(w);
+        free(scales);
+        free(bias);
+        return -1;
+    }
+    for (int i = 0; i < in_dim; i++) x[i] = next_i8();
+    for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    for (int o = 0; o < out_dim; o++) {
+        scales[o] = 0.0002f + 0.00001f * (float)(o % 11);
+        bias[o] = next_f32(0.001f);
+    }
+    float x_scale = 0.0007f;
+    float best_val = 0.0f;
+
+    double t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_q8_range_generic(x, x_scale, w, scales, bias,
+                                                in_dim, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    double t1 = now_ms();
+    double generic_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_q8_range_impl(x, x_scale, w, scales, bias,
+                                             in_dim, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    t1 = now_ms();
+    double native_ms = t1 - t0;
+    print_rate(name, "q8arg", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
+    print_rate(name, "q8arg", "native", in_dim, out_dim, iters, native_ms,
+               generic_ms / native_ms);
+
+    free(x);
+    free(w);
+    free(scales);
+    free(bias);
+    return 0;
+}
+
 static int bench_bf16(const char *name, int in_dim, int out_dim, int iters) {
     float *x = (float *)malloc((size_t)in_dim * sizeof(float));
     uint16_t *w = (uint16_t *)malloc((size_t)in_dim * (size_t)out_dim * sizeof(uint16_t));
@@ -147,6 +197,47 @@ static int bench_bf16(const char *name, int in_dim, int out_dim, int iters) {
     return 0;
 }
 
+static int bench_bf16_argmax(const char *name, int in_dim, int out_dim, int iters) {
+    float *x = (float *)malloc((size_t)in_dim * sizeof(float));
+    uint16_t *w = (uint16_t *)malloc((size_t)in_dim * (size_t)out_dim * sizeof(uint16_t));
+    float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
+    if (!x || !w || !bias) {
+        fprintf(stderr, "allocation failed in bf16 argmax bench\n");
+        free(x);
+        free(w);
+        free(bias);
+        return -1;
+    }
+    for (int i = 0; i < in_dim; i++) x[i] = next_f32(0.002f);
+    for (int i = 0; i < in_dim * out_dim; i++) w[i] = f32_to_bf16(next_f32(0.002f));
+    for (int o = 0; o < out_dim; o++) bias[o] = next_f32(0.001f);
+    float best_val = 0.0f;
+
+    double t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_bf16_range_generic(x, w, bias, in_dim, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    double t1 = now_ms();
+    double generic_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_bf16_range_impl(x, w, bias, in_dim, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    t1 = now_ms();
+    double native_ms = t1 - t0;
+    print_rate(name, "bfarg", "generic", in_dim, out_dim, iters, generic_ms, 1.0);
+    print_rate(name, "bfarg", "native", in_dim, out_dim, iters, native_ms,
+               generic_ms / native_ms);
+
+    free(x);
+    free(w);
+    free(bias);
+    return 0;
+}
+
 int main(void) {
     struct bench_case {
         const char *name;
@@ -170,6 +261,14 @@ int main(void) {
         }
         if (bench_bf16(cases[i].name, cases[i].in_dim, cases[i].out_dim,
                        cases[i].bf16_iters) != 0) {
+            return 1;
+        }
+        if (bench_q8_argmax(cases[i].name, cases[i].in_dim, cases[i].out_dim,
+                            cases[i].q8_iters) != 0) {
+            return 1;
+        }
+        if (bench_bf16_argmax(cases[i].name, cases[i].in_dim, cases[i].out_dim,
+                              cases[i].bf16_iters) != 0) {
             return 1;
         }
     }

@@ -136,7 +136,7 @@ compute.
 Backend-specific BF16 coverage:
 
 - generic C: reference BF16 row dot, matvec, and classifier argmax range
-- NEON: BF16 row dot plus two-output-row matvec
+- NEON: BF16 row dot plus two-output-row matvec and classifier argmax range
 - AVX2/FMA: BF16 row dot plus two-output-row matvec and classifier argmax range
 - AVX512F+BW: 16-lane BF16 conversion plus four-output-row matvec and
   classifier argmax range
