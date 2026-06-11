@@ -153,6 +153,22 @@ Backend-specific W8A8 coverage:
 - AVX-VNNI and AVX512-VNNI: unsigned*signed dot-product instructions with a
   correction term to preserve signed*signed int8 semantics
 
+W8A8 tuning notes from the JFK smoke path:
+
+- Keep activation quantization inside the output-row workers. A shared
+  prequantization pass removes duplicate work, but it serializes a step that
+  was previously parallel and regressed the 8-thread path.
+- Keep prompt/LSTM scalar row helpers out of the main encoder hot path unless
+  the replacement is measured end to end. A wrapper-dispatched row-dot path was
+  slower on the smoke path despite using the same NEON dot-product primitive.
+- The local Apple Silicon target exposes `__ARM_FEATURE_DOTPROD`, but not an
+  i8mm feature macro. The NEON i8mm intrinsics exist in the compiler headers,
+  so an i8mm kernel should stay behind a feature guard until it can be built and
+  measured on a matching target.
+- Scalar activation quantization is currently kept because Clang's optimized
+  scalar loop was faster end to end than a hand-written NEON quantizer in the
+  streaming benchmark.
+
 The row grouping matters for this model because dense operations are mostly
 streaming matvecs. Reusing each loaded input vector across two or four output
 rows reduces instruction overhead and memory traffic pressure without changing
