@@ -171,6 +171,10 @@ W8A8 tuning notes from the JFK smoke path:
 - The NEON Q8 four-output-row tile intentionally stays at one 16-byte dot
   product step per loop. A 32-byte unroll increased register pressure and
   regressed the smoke path.
+- Q8 runtime wrappers keep the temporary activation quantization buffer on the
+  stack for input vectors up to 4096 elements, with heap fallback for larger
+  inputs. This covers the dense Nemotron shapes while avoiding malloc/free in
+  the streaming hot path.
 
 The row grouping matters for this model because dense operations are mostly
 streaming matvecs. Reusing each loaded input vector across two or four output

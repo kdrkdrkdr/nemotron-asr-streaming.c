@@ -23,6 +23,7 @@
 #define NEMO_MAX_THREADS 16
 #define NEMO_PARALLEL_WORK_MIN 262144
 #define NEMO_BLAS_ROWS_MIN 16
+#define NEMO_Q8_STACK_MAX 4096
 
 typedef void (*nemo_parallel_fn_t)(int tid, int n_threads, void *arg);
 
@@ -196,6 +197,15 @@ static float nemo_quantize_q8_symmetric(const float *x, int8_t *x_q8, int n) {
     return scale;
 }
 
+static int8_t *nemo_q8_tmp_alloc(int n, int8_t *stack_buf) {
+    if (n <= NEMO_Q8_STACK_MAX) return stack_buf;
+    return (int8_t *)malloc((size_t)n);
+}
+
+static void nemo_q8_tmp_free(int8_t *ptr, int8_t *stack_buf) {
+    if (ptr != stack_buf) free(ptr);
+}
+
 static int32_t nemo_dot_i8_i8_scalar(const int8_t *a, const int8_t *b, int n) {
     int32_t sum = 0;
     for (int i = 0; i < n; i++) sum += (int32_t)a[i] * (int32_t)b[i];
@@ -210,11 +220,12 @@ static float nemo_q8_dot_quantized_row(const int8_t *x_q8, float x_scale,
 }
 
 static float nemo_q8_dot_row(const float *x, const nemo_weight_t *w, int row, int stride, int n) {
-    int8_t *x_q8 = (int8_t *)malloc((size_t)n);
+    int8_t stack_q8[NEMO_Q8_STACK_MAX];
+    int8_t *x_q8 = nemo_q8_tmp_alloc(n, stack_q8);
     if (!x_q8) return 0.0f;
     float x_scale = nemo_quantize_q8_symmetric(x, x_q8, n);
     float v = nemo_q8_dot_quantized_row(x_q8, x_scale, w, row, stride, n);
-    free(x_q8);
+    nemo_q8_tmp_free(x_q8, stack_q8);
     return v;
 }
 
@@ -324,7 +335,8 @@ static void nemo_q8_linear_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int8_t *x_q8 = (int8_t *)malloc((size_t)t->in_dim);
+    int8_t stack_q8[NEMO_Q8_STACK_MAX];
+    int8_t *x_q8 = nemo_q8_tmp_alloc(t->in_dim, stack_q8);
     if (!x_q8) return;
     for (int r = 0; r < t->rows; r++) {
         const float *xr = t->x + (size_t)r * t->in_dim;
@@ -336,7 +348,7 @@ static void nemo_q8_linear_worker(int tid, int n_threads, void *arg) {
                                   t->b ? t->b + start : NULL,
                                   t->in_dim, end - start);
     }
-    free(x_q8);
+    nemo_q8_tmp_free(x_q8, stack_q8);
 }
 
 typedef struct {
@@ -454,7 +466,8 @@ static void nemo_q8_linear3_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int8_t *x_q8 = (int8_t *)malloc((size_t)t->in_dim);
+    int8_t stack_q8[NEMO_Q8_STACK_MAX];
+    int8_t *x_q8 = nemo_q8_tmp_alloc(t->in_dim, stack_q8);
     if (!x_q8) return;
     for (int r = 0; r < t->rows; r++) {
         const float *xr = t->x + (size_t)r * t->in_dim;
@@ -469,7 +482,7 @@ static void nemo_q8_linear3_worker(int tid, int n_threads, void *arg) {
                                   x_q8, x_scale, t->w2 + (size_t)start * t->in_dim,
                                   t->s2 + start, NULL, t->in_dim, end - start);
     }
-    free(x_q8);
+    nemo_q8_tmp_free(x_q8, stack_q8);
 }
 
 typedef struct {
@@ -540,7 +553,8 @@ static void nemo_argmax_weight_worker(int tid, int n_threads, void *arg) {
         return;
     }
     if (nemo_weight_is_q8(t->w)) {
-        int8_t *x_q8 = (int8_t *)malloc((size_t)t->in_dim);
+        int8_t stack_q8[NEMO_Q8_STACK_MAX];
+        int8_t *x_q8 = nemo_q8_tmp_alloc(t->in_dim, stack_q8);
         if (!x_q8) {
             t->best[tid] = start;
             t->best_val[tid] = -3.4028234663852886e38f;
@@ -551,7 +565,7 @@ static void nemo_argmax_weight_worker(int tid, int n_threads, void *arg) {
                                                  t->w->q8, t->w->q8_scales, t->b,
                                                  t->in_dim, start, end,
                                                  &t->best_val[tid]);
-        free(x_q8);
+        nemo_q8_tmp_free(x_q8, stack_q8);
         return;
     }
     int best = start;
@@ -680,7 +694,8 @@ static void nemo_prompt_q8_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int8_t *x_q8 = (int8_t *)malloc((size_t)t->in_dim);
+    int8_t stack_q8[NEMO_Q8_STACK_MAX];
+    int8_t *x_q8 = nemo_q8_tmp_alloc(t->in_dim, stack_q8);
     if (!x_q8) return;
     for (int r = 0; r < t->rows; r++) {
         const float *xr = t->x + (size_t)r * t->in_dim;
@@ -692,7 +707,7 @@ static void nemo_prompt_q8_worker(int tid, int n_threads, void *arg) {
             t->y[(size_t)r * t->out_dim + o] = v > 0.0f ? v : 0.0f;
         }
     }
-    free(x_q8);
+    nemo_q8_tmp_free(x_q8, stack_q8);
 }
 
 static void nemo_lstm_gates_worker(int tid, int n_threads, void *arg) {
@@ -728,11 +743,13 @@ static void nemo_lstm_gates_q8_worker(int tid, int n_threads, void *arg) {
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
     if (start >= end) return;
-    int8_t *x_q8 = (int8_t *)malloc((size_t)t->dim);
-    int8_t *h_q8 = (int8_t *)malloc((size_t)t->dim);
+    int8_t stack_x_q8[NEMO_Q8_STACK_MAX];
+    int8_t stack_h_q8[NEMO_Q8_STACK_MAX];
+    int8_t *x_q8 = nemo_q8_tmp_alloc(t->dim, stack_x_q8);
+    int8_t *h_q8 = nemo_q8_tmp_alloc(t->dim, stack_h_q8);
     if (!x_q8 || !h_q8) {
-        free(x_q8);
-        free(h_q8);
+        if (x_q8) nemo_q8_tmp_free(x_q8, stack_x_q8);
+        if (h_q8) nemo_q8_tmp_free(h_q8, stack_h_q8);
         return;
     }
     float x_scale = nemo_quantize_q8_symmetric(t->x, x_q8, t->dim);
@@ -745,8 +762,8 @@ static void nemo_lstm_gates_q8_worker(int tid, int n_threads, void *arg) {
         v += nemo_q8_dot_quantized_row(h_q8, h_scale, t->w_hh, o, t->dim, t->dim);
         t->y[o] = v;
     }
-    free(x_q8);
-    free(h_q8);
+    nemo_q8_tmp_free(x_q8, stack_x_q8);
+    nemo_q8_tmp_free(h_q8, stack_h_q8);
 }
 
 float *nemo_alloc(size_t count, size_t elem) {
