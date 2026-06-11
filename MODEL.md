@@ -168,6 +168,9 @@ W8A8 tuning notes from the JFK smoke path:
 - Scalar activation quantization is currently kept because Clang's optimized
   scalar loop was faster end to end than a hand-written NEON quantizer in the
   streaming benchmark.
+- The NEON Q8 four-output-row tile intentionally stays at one 16-byte dot
+  product step per loop. A 32-byte unroll increased register pressure and
+  regressed the smoke path.
 
 The row grouping matters for this model because dense operations are mostly
 streaming matvecs. Reusing each loaded input vector across two or four output

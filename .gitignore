@@ -1,4 +1,5 @@
 *.o
+*.o.tmp
 nemotron_asr
 nemotron_asr_mic
 *.bin
