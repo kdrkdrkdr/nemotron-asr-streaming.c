@@ -3,5 +3,6 @@
 nemotron_asr
 nemotron_asr_mic
 nemotron_kernel_check
+nemotron_kernel_bench
 *.bin
 __pycache__/
