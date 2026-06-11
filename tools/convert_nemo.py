@@ -25,6 +25,7 @@ VERSION = 1
 DTYPE_F32 = 1
 DTYPE_BF16 = 2
 DTYPE_Q8 = 3
+DTYPE_Q8P = 4
 
 
 def align64(f):
@@ -127,6 +128,32 @@ def tensor_q8_bytes(tensor: torch.Tensor) -> bytes:
     return scales.tobytes(order="C") + q.tobytes(order="C")
 
 
+def tensor_q8p_bytes(tensor: torch.Tensor) -> bytes:
+    arr = tensor.detach().cpu().contiguous().float().numpy().astype("<f4", copy=False)
+    if arr.ndim == 0:
+        raise ValueError("cannot q8-quantize scalar tensor")
+    rows = int(arr.shape[0])
+    flat = arr.reshape(rows, -1)
+    cols = int(flat.shape[1])
+    stride = (cols + 15) & ~15
+    row_tiles = (rows + 3) // 4
+
+    max_abs = np.max(np.abs(flat), axis=1)
+    scales = (max_abs / 127.0).astype("<f4", copy=False)
+    safe_scales = scales.copy()
+    safe_scales[safe_scales == 0.0] = 1.0
+    q = np.rint(flat / safe_scales[:, None])
+    q = np.clip(q, -127, 127).astype(np.int8, copy=False)
+
+    qpad = np.zeros((row_tiles * 4, stride), dtype=np.int8)
+    qpad[:rows, :cols] = q
+    packed = np.empty((row_tiles, stride // 16, 4, 16), dtype=np.int8)
+    for rt in range(row_tiles):
+        tile = qpad[rt * 4:(rt + 1) * 4]
+        packed[rt] = tile.reshape(4, stride // 16, 16).transpose(1, 0, 2)
+    return scales.tobytes(order="C") + packed.tobytes(order="C")
+
+
 def write_model(out_path: Path, cfg: dict, state: dict,
                 bf16_linear_weights: bool = False,
                 w8a8_linear_weights: bool = False):
@@ -145,8 +172,8 @@ def write_model(out_path: Path, cfg: dict, state: dict,
             dims = list(tensor.shape)
             dims4 = dims + [1] * (4 - len(dims))
             if should_write_q8(key, tensor, w8a8_linear_weights):
-                dtype = DTYPE_Q8
-                raw = tensor_q8_bytes(tensor)
+                dtype = DTYPE_Q8P
+                raw = tensor_q8p_bytes(tensor)
             elif should_write_bf16(key, tensor, bf16_linear_weights):
                 dtype = DTYPE_BF16
                 raw = tensor_bf16_bytes(tensor)
@@ -175,7 +202,7 @@ def main():
     ap.add_argument("--bf16-linear-weights", action="store_true",
                     help="Store dense linear/RNN-T classifier weights as BF16")
     ap.add_argument("--w8a8-linear-weights", action="store_true",
-                    help="Store dense linear/RNN-T classifier weights as per-row int8 for experimental W8A8 inference")
+                    help="Store dense linear/RNN-T classifier weights as packed per-row int8 for experimental W8A8 inference")
     args = ap.parse_args()
     if args.bf16_linear_weights and args.w8a8_linear_weights:
         raise SystemExit("--bf16-linear-weights and --w8a8-linear-weights are mutually exclusive")

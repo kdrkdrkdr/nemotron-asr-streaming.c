@@ -61,8 +61,8 @@ smaller model files and faster CPU experiments.
 - **Mixed BF16 linear weights**: optional converter path stores dense linear,
   LSTM, and vocabulary classifier weights as BF16 and runs them directly.
 - **Experimental W8A8 linear weights**: optional converter path stores the same
-  dense weights as per-row int8 and dynamically quantizes activations for int8
-  matvec inference.
+  dense weights as packed per-row int8 and dynamically quantizes activations
+  for int8 matvec inference.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
   cache-aware `att_context_size` right context.
 - **Incremental front end**: audio samples and mel frames are accepted
@@ -94,8 +94,8 @@ make generic  # force scalar C fallback with NEMO_FORCE_GENERIC
 make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
-make check-kernels  # compare native BF16/Q8 kernels against generic C
-make bench-kernels  # microbenchmark generic/native BF16/Q8 matvec/argmax paths
+make check-kernels  # compare native BF16/Q8/Q8P kernels against generic C
+make bench-kernels  # microbenchmark generic/native BF16/Q8/Q8P matvec/argmax paths
 make check-arch-syntax  # syntax-check NEON and AVX kernel variants
 make clean
 ```
@@ -107,8 +107,8 @@ build does not require BLAS. `make check-arch-syntax` is a clang-oriented
 cross-syntax check for the architecture-specific kernel files. `make
 bench-kernels` measures generic and native backend speed for representative
 dense matvec and classifier argmax shapes such as FFN, attention, and joint
-vocabulary projections. It also reports the Q8 runtime wrapper path that
-includes dynamic activation quantization.
+vocabulary projections. It also reports the packed Q8P runtime wrapper path
+that includes dynamic activation quantization.
 
 ## Convert Model
 
@@ -149,10 +149,11 @@ followed by vocabulary strings. By default all tensors are float32. With
 `--bf16-linear-weights`, dense encoder, prompt, RNN-T prediction, and joint
 classifier weights are written as BF16 while normalization, bias, convolution,
 mel, and embedding tensors remain float32. With `--w8a8-linear-weights`, those
-dense weights are written as per-output-row int8 plus float32 row scales.
-Activations remain float32 in the graph and are quantized to int8 only at typed
-linear/matvec call sites. The BF16 and W8A8 converter options are mutually
-exclusive.
+dense weights are written as Q8P: per-output-row int8 plus float32 row scales,
+packed in four-output-row tiles with a 16-byte padded input stride. Activations
+remain float32 in the graph and are quantized to int8 only at typed
+linear/matvec call sites, then padded with zeros to the packed stride. The BF16
+and W8A8 converter options are mutually exclusive.
 
 ## WAV Usage
 
@@ -332,21 +333,22 @@ The public kernel surface covers the current hot path:
 - `nemo_lstm_gates_f32` for fused RNN-T prediction LSTM gates
 - typed-weight variants such as `nemo_linear_weight`,
   `nemo_linear3_nobias_weight`, and `nemo_argmax_matvec_weight` for direct
-  f32/BF16/Q8 dispatch
+  f32/BF16/Q8/Q8P dispatch
 
 Backends:
 
-- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32, BF16, and Q8
-  dense paths.
+- `nemotron_asr_kernels_generic.c`: scalar C fallback for f32, BF16, Q8, and
+  packed Q8P dense paths.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, pointwise streaming preconv, and base NEON Q8 matvec/argmax.
+  axpy, pointwise streaming preconv, and base NEON Q8/Q8P matvec/argmax.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, pointwise streaming preconv, and Q8 matvec/argmax.
+  axpy, pointwise streaming preconv, and Q8/Q8P matvec/argmax.
 - `nemotron_asr_kernels_avx.c` on AVX512F+BW: 16-lane BF16 conversion plus
   four-output-row BF16 matvec/argmax range.
-- Q8 paths use baseline NEON and AVX2 integer SIMD.
+- Q8P paths use baseline NEON and AVX2 integer SIMD only: no dotprod, i8mm,
+  VNNI, or AVX512-VNNI dependency is required.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -360,14 +362,14 @@ Threading:
 - Small operations stay single-threaded to avoid scheduling overhead.
 - BF16 linear weights are consumed directly instead of being expanded into a
   full float32 side buffer.
-- W8A8 linear weights are consumed directly from the mmap'd int8 payload and
-  use dynamic per-vector activation quantization.
+- W8A8 linear weights are consumed directly from the mmap'd packed int8 payload
+  and use dynamic per-vector activation quantization.
 - NEON and AVX2 compute BF16 matvecs and classifier argmax ranges two output
   rows at a time to reuse input vector loads.
 - AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
   at a time.
-- Q8 matvec and classifier argmax use four-output-row int8 tiles in the
-  generic, NEON, and AVX2 backends.
+- Q8P matvec and classifier argmax use four-output-row packed int8 tiles with a
+  16-byte padded stride in the generic, NEON, and AVX2 backends.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -375,13 +377,11 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 
 | build/options | inference | realtime |
 |---------------|-----------|----------|
-| native, `-t 1` | 9.65 s | 1.14x |
-| native, `-t 8` | 3.60 s | 3.06x |
-| native, BF16 linear, `-t 8` | 2.16 s | 5.10x |
-| native, W8A8 linear, `-t 8` | 2.35 s | 4.67x |
-| BLAS, `-t 8` | 3.63 s | 3.03x |
-| generic, `-t 8` | 4.73 s | 2.33x |
-| generic, BF16 linear, `-t 8` | 3.41 s | 3.22x |
+| native fp32, `-t 1` | 10.54 s | 1.04x |
+| native fp32, `-t 8` | 9.65 s | 1.14x |
+| native BF16 linear, `-t 8` | 4.34 s | 2.53x |
+| native W8A8 Q8P linear, `-t 8` | 2.26 s | 4.87x |
+| generic fp32, `-t 8` | 6.21 s | 1.77x |
 
 ## Smoke Checks
 

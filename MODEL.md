@@ -85,8 +85,10 @@ Current SIMD backends should therefore prioritize:
   `nemo_argmax_matvec_weight` for direct BF16 linear weights
 - BF16 dense helpers: `nemo_dot_bf16_f32_impl`,
   `nemo_bf16_matvec_fused_impl`, and `nemo_argmax_bf16_range_impl`
-- W8A8 dense helpers: `nemo_q8_matvec_fused_impl` and
-  `nemo_argmax_q8_range_impl`
+- W8A8 dense helpers: row-major `nemo_q8_matvec_fused_impl` /
+  `nemo_argmax_q8_range_impl` for compatibility, plus packed
+  `nemo_q8p_matvec_fused_impl` / `nemo_argmax_q8p_range_impl` for new
+  W8A8 model files
 
 CPU engine optimizations now mirror the useful qwen-asr patterns that apply to
 Nemotron's graph:
@@ -97,12 +99,14 @@ Nemotron's graph:
 - optional BF16 model conversion for dense linear, LSTM, and joint classifier
   weights, consumed directly without expanding a full float32 copy
 - experimental W8A8 model conversion for the same dense weights, stored as
-  per-row int8 plus float32 row scales and consumed directly from the mmap'd
-  model file
+  packed Q8P: per-row int8 plus float32 row scales in four-output-row tiles
+  with a 16-byte padded input stride, consumed directly from the mmap'd model
+  file
 - architecture-dispatched BF16 row dot, matvec, and classifier argmax range
   for those typed dense weights
-- architecture-dispatched Q8 matvec and classifier argmax range for linear-only
-  W8A8 experiments
+- architecture-dispatched Q8P matvec and classifier argmax range for
+  linear-only W8A8 experiments, with row-major Q8 retained as a compatibility
+  loader/runtime path
 - fused `nemo_linear3_nobias` for encoder Q/K/V projection
 - threaded `nemo_prompt_linear_relu` for language prompt projection
 - fused `nemo_lstm_gates_f32` for RNN-T prediction-network gate projection
@@ -126,12 +130,13 @@ convolution filters, mel front-end tensors, and the prediction embedding remain
 float32.
 
 The W8A8 path follows the same boundary. It quantizes dense linear-family
-weights offline with one scale per output row. At runtime, each input vector is
-quantized symmetrically to int8 immediately before the typed matvec, the dot
-product accumulates into int32, and the result is dequantized back to float32.
-The rest of the graph stays float32. This keeps the original streaming model
-structure intact while making the dominant dense operations cheaper to load and
-compute.
+weights offline with one scale per output row, then packs them into Q8P tiles:
+four output rows at a time, input dimension padded to a 16-byte stride. At
+runtime, each input vector is quantized symmetrically to int8 immediately
+before the typed matvec, padded with zeros to that stride, accumulated into
+int32, and dequantized back to float32. The rest of the graph stays float32.
+This keeps the original streaming model structure intact while making the
+dominant dense operations cheaper to load and compute.
 
 Backend-specific BF16 coverage:
 
@@ -143,12 +148,13 @@ Backend-specific BF16 coverage:
 
 Backend-specific W8A8 coverage:
 
-- generic C: scalar int8 dot plus four-output-row matvec and classifier argmax
-  tiles
+- generic C: scalar int8 dot plus four-output-row Q8P matvec and classifier
+  argmax tiles
 - NEON: base integer SIMD path using signed int8 multiply, int16 products, and
-  int32 accumulation, with four-output-row matvec and classifier argmax tiles
+  int32 accumulation, with four-output-row Q8P matvec and classifier argmax
+  tiles
 - AVX2/FMA: signed int8 dot via int8->int16 widening and `madd_epi16`, with
-  four-output-row matvec and classifier argmax tiles
+  four-output-row Q8P matvec and classifier argmax tiles
 
 W8A8 tuning notes from the JFK smoke path:
 
@@ -160,16 +166,20 @@ W8A8 tuning notes from the JFK smoke path:
   slower on the smoke path despite using the same quantized row-dot boundary.
 - W8A8 int8 kernels intentionally stay on baseline architecture SIMD:
   base NEON uses `vmull_s8` plus `vpadalq_s16`, and AVX2 uses signed
-  int8->int16 widening plus `madd_epi16`.
+  int8->int16 widening plus `madd_epi16`. The branch does not require NEON
+  dotprod/i8mm or x86 VNNI.
 - Scalar activation quantization is currently kept because Clang's optimized
   scalar loop was faster end to end than a hand-written NEON quantizer in the
   streaming benchmark.
-- The NEON Q8 four-output-row tile intentionally stays at one 16-byte int8
+- Q8P weight packing is now done by the converter. The runtime reads the
+  packed mmap payload directly and only zero-pads the temporary activation
+  vector to the tensor stride.
+- The NEON Q8P four-output-row tile intentionally stays at one 16-byte int8
   multiply/accumulate step per loop to keep register pressure modest.
-- Q8 runtime wrappers keep the temporary activation quantization buffer on the
-  stack for input vectors up to 4096 elements, with heap fallback for larger
-  inputs. This covers the dense Nemotron shapes while avoiding malloc/free in
-  the streaming hot path.
+- Q8/Q8P runtime wrappers keep the temporary activation quantization buffer on
+  the stack for input vectors up to 4096 elements, with heap fallback for
+  larger inputs. This covers the dense Nemotron shapes while avoiding
+  malloc/free in the streaming hot path.
 
 The row grouping matters for this model because dense operations are mostly
 streaming matvecs. Reusing each loaded input vector across two or four output

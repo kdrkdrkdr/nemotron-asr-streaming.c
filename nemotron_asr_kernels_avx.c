@@ -279,6 +279,127 @@ int nemo_argmax_q8_range_avx(const int8_t *x_q8, float x_scale,
     return best;
 }
 
+static inline const int8_t *q8p_row_block_avx(const int8_t *w, int row,
+                                              int stride, int k) {
+    const int tile = row >> 2;
+    const int lane = row & 3;
+    return w + (size_t)tile * 4u * (size_t)stride +
+           (size_t)(k >> 4) * 64u + (size_t)lane * 16u;
+}
+
+static inline int32_t dot_i8p_avx_inline(const int8_t *x, const int8_t *w,
+                                         int row, int stride) {
+    __m256i acc = _mm256_setzero_si256();
+    for (int k = 0; k < stride; k += 16) {
+        __m256i xv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(x + k)));
+        __m256i wv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)q8p_row_block_avx(w, row, stride, k)));
+        acc = _mm256_add_epi32(acc, _mm256_madd_epi16(xv, wv));
+    }
+    return hsum_m256i_epi32(acc);
+}
+
+static inline void dot4_i8p_avx_inline(const int8_t *x, const int8_t *w,
+                                       int row, int stride,
+                                       int32_t *s0_out, int32_t *s1_out,
+                                       int32_t *s2_out, int32_t *s3_out) {
+    const int tile = row >> 2;
+    const int8_t *tile_base = w + (size_t)tile * 4u * (size_t)stride;
+    __m256i a0 = _mm256_setzero_si256();
+    __m256i a1 = _mm256_setzero_si256();
+    __m256i a2 = _mm256_setzero_si256();
+    __m256i a3 = _mm256_setzero_si256();
+    for (int k = 0; k < stride; k += 16) {
+        const int8_t *blk = tile_base + (size_t)(k >> 4) * 64u;
+        __m256i xv = _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(x + k)));
+        a0 = _mm256_add_epi32(a0,
+                              _mm256_madd_epi16(xv, _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)blk))));
+        a1 = _mm256_add_epi32(a1,
+                              _mm256_madd_epi16(xv, _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(blk + 16)))));
+        a2 = _mm256_add_epi32(a2,
+                              _mm256_madd_epi16(xv, _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(blk + 32)))));
+        a3 = _mm256_add_epi32(a3,
+                              _mm256_madd_epi16(xv, _mm256_cvtepi8_epi16(_mm_loadu_si128((const __m128i *)(blk + 48)))));
+    }
+    *s0_out = hsum_m256i_epi32(a0);
+    *s1_out = hsum_m256i_epi32(a1);
+    *s2_out = hsum_m256i_epi32(a2);
+    *s3_out = hsum_m256i_epi32(a3);
+}
+
+void nemo_q8p_matvec_fused_avx(float *y, const int8_t *x_q8, float x_scale,
+                               const int8_t *w, const float *w_scales,
+                               const float *b, int stride, int start, int out_dim) {
+    int i = 0;
+    int o = start;
+    for (; i < out_dim && (o & 3); i++, o++) {
+        int32_t acc = dot_i8p_avx_inline(x_q8, w, o, stride);
+        y[i] = (float)acc * x_scale * w_scales[o] + (b ? b[i] : 0.0f);
+    }
+    for (; i + 3 < out_dim; i += 4, o += 4) {
+        int32_t s0, s1, s2, s3;
+        dot4_i8p_avx_inline(x_q8, w, o, stride, &s0, &s1, &s2, &s3);
+        y[i] = (float)s0 * x_scale * w_scales[o] + (b ? b[i] : 0.0f);
+        y[i + 1] = (float)s1 * x_scale * w_scales[o + 1] + (b ? b[i + 1] : 0.0f);
+        y[i + 2] = (float)s2 * x_scale * w_scales[o + 2] + (b ? b[i + 2] : 0.0f);
+        y[i + 3] = (float)s3 * x_scale * w_scales[o + 3] + (b ? b[i + 3] : 0.0f);
+    }
+    for (; i < out_dim; i++, o++) {
+        int32_t acc = dot_i8p_avx_inline(x_q8, w, o, stride);
+        y[i] = (float)acc * x_scale * w_scales[o] + (b ? b[i] : 0.0f);
+    }
+}
+
+int nemo_argmax_q8p_range_avx(const int8_t *x_q8, float x_scale,
+                              const int8_t *w, const float *w_scales,
+                              const float *b, int stride, int start, int end,
+                              float *best_val_out) {
+    int best = start;
+    float best_val = -3.4028234663852886e38f;
+    int o = start;
+    for (; o < end && (o & 3); o++) {
+        int32_t acc = dot_i8p_avx_inline(x_q8, w, o, stride);
+        float v = (float)acc * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    for (; o + 3 < end; o += 4) {
+        int32_t s0, s1, s2, s3;
+        dot4_i8p_avx_inline(x_q8, w, o, stride, &s0, &s1, &s2, &s3);
+        float v0 = (float)s0 * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        float v1 = (float)s1 * x_scale * w_scales[o + 1] + (b ? b[o + 1] : 0.0f);
+        float v2 = (float)s2 * x_scale * w_scales[o + 2] + (b ? b[o + 2] : 0.0f);
+        float v3 = (float)s3 * x_scale * w_scales[o + 3] + (b ? b[o + 3] : 0.0f);
+        if (v0 > best_val) {
+            best_val = v0;
+            best = o;
+        }
+        if (v1 > best_val) {
+            best_val = v1;
+            best = o + 1;
+        }
+        if (v2 > best_val) {
+            best_val = v2;
+            best = o + 2;
+        }
+        if (v3 > best_val) {
+            best_val = v3;
+            best = o + 3;
+        }
+    }
+    for (; o < end; o++) {
+        int32_t acc = dot_i8p_avx_inline(x_q8, w, o, stride);
+        float v = (float)acc * x_scale * w_scales[o] + (b ? b[o] : 0.0f);
+        if (v > best_val) {
+            best_val = v;
+            best = o;
+        }
+    }
+    if (best_val_out) *best_val_out = best_val;
+    return best;
+}
+
 #if defined(__AVX512F__) && defined(__AVX512BW__)
 static inline __m512 bf16x16_to_f32_avx512(const uint16_t *src) {
     __m256i raw = _mm256_loadu_si256((const __m256i *)src);

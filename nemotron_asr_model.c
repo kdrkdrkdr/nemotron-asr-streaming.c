@@ -39,6 +39,16 @@ static const unsigned char *align64(const unsigned char *base, const unsigned ch
     return base + off;
 }
 
+static uint64_t align_u64(uint64_t v, uint64_t a) {
+    return (v + a - 1u) & ~(a - 1u);
+}
+
+static uint64_t tensor_row_elems(uint8_t ndims, const uint64_t dims[4]) {
+    uint64_t n = 1;
+    for (uint8_t d = 1; d < ndims; d++) n *= dims[d];
+    return n;
+}
+
 static char *dup_bytes(const unsigned char *p, size_t n) {
     char *s = (char *)malloc(n + 1);
     if (!s) return NULL;
@@ -84,9 +94,12 @@ static int bind_weight(const nemo_model_t *m, const char *name, nemo_weight_t *d
         dst->bf16 = t->data_bf16;
         return 0;
     }
-    if (t->dtype == NEMO_TENSOR_Q8 && t->data_q8 && t->q8_scales) {
+    if ((t->dtype == NEMO_TENSOR_Q8 || t->dtype == NEMO_TENSOR_Q8P) &&
+        t->data_q8 && t->q8_scales) {
         dst->q8 = t->data_q8;
         dst->q8_scales = t->q8_scales;
+        dst->q8_stride = (uint32_t)t->q8_stride;
+        dst->q8_packed = t->q8_packed;
         return 0;
     }
     fprintf(stderr, "nemotron: tensor %s has unsupported weight dtype %u\n", name, t->dtype);
@@ -233,7 +246,8 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
         uint16_t name_len = rd_u16(&p);
         uint8_t ndims = *p++;
         uint8_t dtype = *p++;
-        if ((dtype != NEMO_TENSOR_F32 && dtype != NEMO_TENSOR_BF16 && dtype != NEMO_TENSOR_Q8) ||
+        if ((dtype != NEMO_TENSOR_F32 && dtype != NEMO_TENSOR_BF16 &&
+             dtype != NEMO_TENSOR_Q8 && dtype != NEMO_TENSOR_Q8P) ||
             ndims > 4 || p + name_len + 4 * 8 + 8 > end) {
             fprintf(stderr, "nemotron: corrupt tensor table\n");
             nemo_model_free(model);
@@ -251,12 +265,32 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
             return -1;
         }
         model->tensors[ti].name = name;
+        model->tensors[ti].dtype = dtype;
+        model->tensors[ti].ndims = ndims;
         model->tensors[ti].data = dtype == NEMO_TENSOR_F32 ? (const float *)p : NULL;
         model->tensors[ti].data_bf16 = dtype == NEMO_TENSOR_BF16 ? (const uint16_t *)p : NULL;
-        if (dtype == NEMO_TENSOR_Q8) {
+        if (dtype == NEMO_TENSOR_Q8 || dtype == NEMO_TENSOR_Q8P) {
             uint64_t rows = model->tensors[ti].dims[0];
+            uint64_t cols = tensor_row_elems(ndims, model->tensors[ti].dims);
             uint64_t scale_bytes = rows * sizeof(float);
-            if (rows == 0 || scale_bytes > nbytes) {
+            if (rows == 0 || cols == 0 || scale_bytes > nbytes) {
+                fprintf(stderr, "nemotron: corrupt q8 tensor %s\n", name ? name : "?");
+                nemo_model_free(model);
+                return -1;
+            }
+            uint64_t data_bytes = 0;
+            if (dtype == NEMO_TENSOR_Q8P) {
+                uint64_t stride = align_u64(cols, 16);
+                uint64_t packed_rows = align_u64(rows, 4);
+                data_bytes = packed_rows * stride;
+                model->tensors[ti].q8_stride = stride;
+                model->tensors[ti].q8_packed = 1;
+            } else {
+                data_bytes = rows * cols;
+                model->tensors[ti].q8_stride = cols;
+                model->tensors[ti].q8_packed = 0;
+            }
+            if (scale_bytes > nbytes || data_bytes > nbytes - scale_bytes) {
                 fprintf(stderr, "nemotron: corrupt q8 tensor %s\n", name ? name : "?");
                 nemo_model_free(model);
                 return -1;
@@ -264,8 +298,6 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
             model->tensors[ti].q8_scales = (const float *)p;
             model->tensors[ti].data_q8 = (const int8_t *)(p + scale_bytes);
         }
-        model->tensors[ti].dtype = dtype;
-        model->tensors[ti].ndims = ndims;
         model->tensors[ti].nbytes = nbytes;
         p += nbytes;
         p = align64(base, p);

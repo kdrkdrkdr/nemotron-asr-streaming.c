@@ -46,6 +46,26 @@ static float checksum(const float *x, int n) {
     return s;
 }
 
+static int align_int(int v, int a) {
+    return (v + a - 1) & ~(a - 1);
+}
+
+static void pack_q8p(int8_t *packed, const int8_t *w, int in_dim, int out_dim) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
+    memset(packed, 0, (size_t)packed_rows * (size_t)stride);
+    for (int o = 0; o < out_dim; o++) {
+        int tile = o >> 2;
+        int lane = o & 3;
+        for (int k = 0; k < in_dim; k++) {
+            size_t dst = (size_t)tile * 4u * (size_t)stride +
+                         (size_t)(k >> 4) * 64u +
+                         (size_t)lane * 16u + (size_t)(k & 15);
+            packed[dst] = w[(size_t)o * in_dim + k];
+        }
+    }
+}
+
 static void print_rate(const char *name, const char *kind, const char *backend,
                        int in_dim, int out_dim, int iters, double ms,
                        double speedup) {
@@ -56,22 +76,30 @@ static void print_rate(const char *name, const char *kind, const char *backend,
 }
 
 static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
     int8_t *x = (int8_t *)malloc((size_t)in_dim);
+    int8_t *xpad = (int8_t *)calloc((size_t)stride, 1);
     int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    int8_t *wp = (int8_t *)malloc((size_t)packed_rows * (size_t)stride);
     float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
     float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
     float *y = (float *)malloc((size_t)out_dim * sizeof(float));
-    if (!x || !w || !scales || !bias || !y) {
+    if (!x || !xpad || !w || !wp || !scales || !bias || !y) {
         fprintf(stderr, "allocation failed in q8 bench\n");
         free(x);
+        free(xpad);
         free(w);
+        free(wp);
         free(scales);
         free(bias);
         free(y);
         return -1;
     }
     for (int i = 0; i < in_dim; i++) x[i] = next_i8();
+    memcpy(xpad, x, (size_t)in_dim);
     for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    pack_q8p(wp, w, in_dim, out_dim);
     for (int o = 0; o < out_dim; o++) {
         scales[o] = 0.0002f + 0.00001f * (float)(o % 11);
         bias[o] = next_f32(0.001f);
@@ -97,8 +125,29 @@ static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
     print_rate(name, "q8", "native", in_dim, out_dim, iters, native_ms,
                generic_ms / native_ms);
 
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        nemo_q8p_matvec_fused_generic(y, xpad, x_scale, wp, scales, bias, stride, 0, out_dim);
+        sink_f32 += checksum(y, out_dim);
+    }
+    t1 = now_ms();
+    double generic_packed_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        nemo_q8p_matvec_fused_impl(y, xpad, x_scale, wp, scales, bias, stride, 0, out_dim);
+        sink_f32 += checksum(y, out_dim);
+    }
+    t1 = now_ms();
+    double native_packed_ms = t1 - t0;
+    print_rate(name, "q8p", "generic", in_dim, out_dim, iters, generic_packed_ms, 1.0);
+    print_rate(name, "q8p", "native", in_dim, out_dim, iters, native_packed_ms,
+               generic_packed_ms / native_packed_ms);
+
     free(x);
+    free(xpad);
     free(w);
+    free(wp);
     free(scales);
     free(bias);
     free(y);
@@ -106,20 +155,28 @@ static int bench_q8(const char *name, int in_dim, int out_dim, int iters) {
 }
 
 static int bench_q8_argmax(const char *name, int in_dim, int out_dim, int iters) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
     int8_t *x = (int8_t *)malloc((size_t)in_dim);
+    int8_t *xpad = (int8_t *)calloc((size_t)stride, 1);
     int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    int8_t *wp = (int8_t *)malloc((size_t)packed_rows * (size_t)stride);
     float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
     float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
-    if (!x || !w || !scales || !bias) {
+    if (!x || !xpad || !w || !wp || !scales || !bias) {
         fprintf(stderr, "allocation failed in q8 argmax bench\n");
         free(x);
+        free(xpad);
         free(w);
+        free(wp);
         free(scales);
         free(bias);
         return -1;
     }
     for (int i = 0; i < in_dim; i++) x[i] = next_i8();
+    memcpy(xpad, x, (size_t)in_dim);
     for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    pack_q8p(wp, w, in_dim, out_dim);
     for (int o = 0; o < out_dim; o++) {
         scales[o] = 0.0002f + 0.00001f * (float)(o % 11);
         bias[o] = next_f32(0.001f);
@@ -148,23 +205,50 @@ static int bench_q8_argmax(const char *name, int in_dim, int out_dim, int iters)
     print_rate(name, "q8arg", "native", in_dim, out_dim, iters, native_ms,
                generic_ms / native_ms);
 
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_q8p_range_generic(xpad, x_scale, wp, scales, bias,
+                                                 stride, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    t1 = now_ms();
+    double generic_packed_ms = t1 - t0;
+
+    t0 = now_ms();
+    for (int i = 0; i < iters; i++) {
+        int best = nemo_argmax_q8p_range_impl(xpad, x_scale, wp, scales, bias,
+                                              stride, 0, out_dim, &best_val);
+        sink_f32 += best_val + (float)best;
+    }
+    t1 = now_ms();
+    double native_packed_ms = t1 - t0;
+    print_rate(name, "q8parg", "generic", in_dim, out_dim, iters, generic_packed_ms, 1.0);
+    print_rate(name, "q8parg", "native", in_dim, out_dim, iters, native_packed_ms,
+               generic_packed_ms / native_packed_ms);
+
     free(x);
+    free(xpad);
     free(w);
+    free(wp);
     free(scales);
     free(bias);
     return 0;
 }
 
 static int bench_q8_runtime(const char *name, int in_dim, int out_dim, int iters) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
     float *x = (float *)malloc((size_t)in_dim * sizeof(float));
     int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    int8_t *wp = (int8_t *)malloc((size_t)packed_rows * (size_t)stride);
     float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
     float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
     float *y = (float *)malloc((size_t)out_dim * sizeof(float));
-    if (!x || !w || !scales || !bias || !y) {
+    if (!x || !w || !wp || !scales || !bias || !y) {
         fprintf(stderr, "allocation failed in q8 runtime bench\n");
         free(x);
         free(w);
+        free(wp);
         free(scales);
         free(bias);
         free(y);
@@ -172,14 +256,17 @@ static int bench_q8_runtime(const char *name, int in_dim, int out_dim, int iters
     }
     for (int i = 0; i < in_dim; i++) x[i] = next_f32(0.002f);
     for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    pack_q8p(wp, w, in_dim, out_dim);
     for (int o = 0; o < out_dim; o++) {
         scales[o] = 0.0002f + 0.00001f * (float)(o % 11);
         bias[o] = next_f32(0.001f);
     }
     nemo_weight_t weight = {
-        .q8 = w,
+        .q8 = wp,
         .q8_scales = scales,
-        .dtype = NEMO_TENSOR_Q8,
+        .q8_stride = (uint32_t)stride,
+        .q8_packed = 1,
+        .dtype = NEMO_TENSOR_Q8P,
     };
 
     double t0 = now_ms();
@@ -203,6 +290,7 @@ static int bench_q8_runtime(const char *name, int in_dim, int out_dim, int iters
 
     free(x);
     free(w);
+    free(wp);
     free(scales);
     free(bias);
     free(y);

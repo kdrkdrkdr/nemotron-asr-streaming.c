@@ -11,12 +11,15 @@
 #define NEMO_TENSOR_F32  1u
 #define NEMO_TENSOR_BF16 2u
 #define NEMO_TENSOR_Q8   3u
+#define NEMO_TENSOR_Q8P  4u
 
 typedef struct {
     const float *f32;
     const uint16_t *bf16;
     const int8_t *q8;
     const float *q8_scales;
+    uint32_t q8_stride;
+    uint8_t q8_packed;
     uint8_t dtype;
 } nemo_weight_t;
 

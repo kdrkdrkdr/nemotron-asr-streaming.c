@@ -26,6 +26,26 @@ static float next_f32(float scale) {
     return (float)v * scale;
 }
 
+static int align_int(int v, int a) {
+    return (v + a - 1) & ~(a - 1);
+}
+
+static void pack_q8p(int8_t *packed, const int8_t *w, int in_dim, int out_dim) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
+    memset(packed, 0, (size_t)packed_rows * (size_t)stride);
+    for (int o = 0; o < out_dim; o++) {
+        int tile = o >> 2;
+        int lane = o & 3;
+        for (int k = 0; k < in_dim; k++) {
+            size_t dst = (size_t)tile * 4u * (size_t)stride +
+                         (size_t)(k >> 4) * 64u +
+                         (size_t)lane * 16u + (size_t)(k & 15);
+            packed[dst] = w[(size_t)o * in_dim + k];
+        }
+    }
+}
+
 static uint16_t f32_to_bf16(float v) {
     uint32_t bits;
     memcpy(&bits, &v, sizeof(bits));
@@ -39,24 +59,36 @@ static int nearly_equal(float a, float b, float atol, float rtol) {
 }
 
 static int check_q8_matvec_case(int in_dim, int out_dim) {
+    int stride = align_int(in_dim, 16);
+    int packed_rows = align_int(out_dim, 4);
     int8_t *x = (int8_t *)malloc((size_t)in_dim);
+    int8_t *xpad = (int8_t *)calloc((size_t)stride, 1);
     int8_t *w = (int8_t *)malloc((size_t)in_dim * (size_t)out_dim);
+    int8_t *wp = (int8_t *)malloc((size_t)packed_rows * (size_t)stride);
     float *scales = (float *)malloc((size_t)out_dim * sizeof(float));
     float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
     float *yg = (float *)malloc((size_t)out_dim * sizeof(float));
     float *yi = (float *)malloc((size_t)out_dim * sizeof(float));
-    if (!x || !w || !scales || !bias || !yg || !yi) {
+    float *ypg = (float *)malloc((size_t)out_dim * sizeof(float));
+    float *ypi = (float *)malloc((size_t)out_dim * sizeof(float));
+    if (!x || !xpad || !w || !wp || !scales || !bias || !yg || !yi || !ypg || !ypi) {
         free(x);
+        free(xpad);
         free(w);
+        free(wp);
         free(scales);
         free(bias);
         free(yg);
         free(yi);
+        free(ypg);
+        free(ypi);
         return -1;
     }
 
     for (int i = 0; i < in_dim; i++) x[i] = next_i8();
+    memcpy(xpad, x, (size_t)in_dim);
     for (int i = 0; i < in_dim * out_dim; i++) w[i] = next_i8();
+    pack_q8p(wp, w, in_dim, out_dim);
     for (int o = 0; o < out_dim; o++) {
         scales[o] = 0.0003f + 0.00001f * (float)(o % 17);
         bias[o] = next_f32(0.001f);
@@ -79,6 +111,27 @@ static int check_q8_matvec_case(int in_dim, int out_dim) {
         }
     }
 
+    nemo_q8p_matvec_fused_generic(ypg, xpad, x_scale, wp, scales, bias, stride, 0, out_dim);
+    nemo_q8p_matvec_fused_impl(ypi, xpad, x_scale, wp, scales, bias, stride, 0, out_dim);
+    for (int o = 0; o < out_dim; o++) {
+        if (!nearly_equal(yg[o], ypg[o], 1e-5f, 1e-6f) ||
+            !nearly_equal(ypg[o], ypi[o], 1e-5f, 1e-6f)) {
+            fprintf(stderr, "q8p matvec mismatch in=%d out=%d o=%d row=%g packed=%g impl=%g\n",
+                    in_dim, out_dim, o, yg[o], ypg[o], ypi[o]);
+            free(x);
+            free(xpad);
+            free(w);
+            free(wp);
+            free(scales);
+            free(bias);
+            free(yg);
+            free(yi);
+            free(ypg);
+            free(ypi);
+            return -1;
+        }
+    }
+
     int start = out_dim > 3 ? 1 : 0;
     int end = out_dim > 3 ? out_dim - 1 : out_dim;
     float vg = 0.0f, vi = 0.0f;
@@ -88,20 +141,51 @@ static int check_q8_matvec_case(int in_dim, int out_dim) {
         fprintf(stderr, "q8 argmax mismatch in=%d out=%d generic=(%d,%g) impl=(%d,%g)\n",
                 in_dim, out_dim, bg, vg, bi, vi);
         free(x);
+        free(xpad);
         free(w);
+        free(wp);
         free(scales);
         free(bias);
         free(yg);
         free(yi);
+        free(ypg);
+        free(ypi);
+        return -1;
+    }
+
+    float vpg = 0.0f, vpi = 0.0f;
+    int bpg = nemo_argmax_q8p_range_generic(xpad, x_scale, wp, scales, bias,
+                                            stride, start, end, &vpg);
+    int bpi = nemo_argmax_q8p_range_impl(xpad, x_scale, wp, scales, bias,
+                                         stride, start, end, &vpi);
+    if (bg != bpg || bpg != bpi ||
+        !nearly_equal(vg, vpg, 1e-5f, 1e-6f) ||
+        !nearly_equal(vpg, vpi, 1e-5f, 1e-6f)) {
+        fprintf(stderr, "q8p argmax mismatch in=%d out=%d row=(%d,%g) packed=(%d,%g) impl=(%d,%g)\n",
+                in_dim, out_dim, bg, vg, bpg, vpg, bpi, vpi);
+        free(x);
+        free(xpad);
+        free(w);
+        free(wp);
+        free(scales);
+        free(bias);
+        free(yg);
+        free(yi);
+        free(ypg);
+        free(ypi);
         return -1;
     }
 
     free(x);
+    free(xpad);
     free(w);
+    free(wp);
     free(scales);
     free(bias);
     free(yg);
     free(yi);
+    free(ypg);
+    free(ypi);
     return 0;
 }
 
