@@ -94,6 +94,7 @@ make generic  # force scalar C fallback with NEMO_FORCE_GENERIC
 make blas     # optional Accelerate/OpenBLAS dense path
 make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
+make check-kernels  # compare native BF16/Q8 kernels against generic C
 make clean
 ```
 
@@ -383,6 +384,7 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 ```bash
 python3 -m py_compile tools/convert_nemo.py
 make clean && make
+make check-kernels
 
 ./nemotron_asr \
   -m nemotron-3.5-asr-streaming-0.6b-bf16-linear.bin \

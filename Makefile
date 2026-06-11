@@ -4,19 +4,27 @@ LDFLAGS ?= -lm -lpthread -flto
 
 TARGET = nemotron_asr
 MIC_TARGET = nemotron_asr_mic
+KERNEL_CHECK_TARGET = nemotron_kernel_check
 RUNTIME_SRCS = nemotron_asr.c nemotron_asr_audio.c nemotron_asr_encoder.c nemotron_asr_decoder.c nemotron_asr_model.c nemotron_asr_kernels.c nemotron_asr_kernels_generic.c nemotron_asr_kernels_neon.c nemotron_asr_kernels_avx.c
 SRCS = main.c $(RUNTIME_SRCS)
 OBJS = $(SRCS:.c=.o)
 RUNTIME_OBJS = $(RUNTIME_SRCS:.c=.o)
 MIC_OBJS = mic.o $(RUNTIME_OBJS)
+KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 UNAME_S := $(shell uname -s)
 
-.PHONY: all clean debug generic blas mic
+.PHONY: all clean debug generic blas mic check-kernels
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
+
+$(KERNEL_CHECK_TARGET): $(KERNEL_CHECK_OBJS)
+	$(CC) $(CFLAGS) -o $@ $(KERNEL_CHECK_OBJS) $(LDFLAGS)
+
+check-kernels: $(KERNEL_CHECK_TARGET)
+	./$(KERNEL_CHECK_TARGET)
 
 ifeq ($(UNAME_S),Darwin)
 mic: $(MIC_TARGET)
@@ -50,4 +58,4 @@ endif
 blas: clean $(TARGET)
 
 clean:
-	rm -f $(OBJS) mic.o $(MIC_TARGET) $(TARGET)
+	rm -f $(OBJS) kernel_check.o mic.o $(KERNEL_CHECK_TARGET) $(MIC_TARGET) $(TARGET)
