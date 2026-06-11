@@ -1,6 +1,9 @@
 CC ?= cc
 CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -march=native -ffast-math -flto
 LDFLAGS ?= -lm -lpthread -flto
+SYNTAX_ARM_TARGET ?= arm64-apple-macos13
+SYNTAX_X86_TARGET ?= x86_64-apple-macos13
+SYNTAX_CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -ffast-math -fsyntax-only
 
 TARGET = nemotron_asr
 MIC_TARGET = nemotron_asr_mic
@@ -13,7 +16,7 @@ MIC_OBJS = mic.o $(RUNTIME_OBJS)
 KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 UNAME_S := $(shell uname -s)
 
-.PHONY: all clean debug generic blas mic check-kernels
+.PHONY: all clean debug generic blas mic check-kernels check-arch-syntax
 
 all: $(TARGET)
 
@@ -25,6 +28,13 @@ $(KERNEL_CHECK_TARGET): $(KERNEL_CHECK_OBJS)
 
 check-kernels: $(KERNEL_CHECK_TARGET)
 	./$(KERNEL_CHECK_TARGET)
+
+check-arch-syntax:
+	$(CC) -target $(SYNTAX_ARM_TARGET) $(SYNTAX_CFLAGS) nemotron_asr_kernels_neon.c
+	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma nemotron_asr_kernels_avx.c
+	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavxvnni nemotron_asr_kernels_avx.c
+	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavxvnniint8 nemotron_asr_kernels_avx.c
+	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavx512f -mavx512bw -mavx512vnni nemotron_asr_kernels_avx.c
 
 ifeq ($(UNAME_S),Darwin)
 mic: $(MIC_TARGET)
