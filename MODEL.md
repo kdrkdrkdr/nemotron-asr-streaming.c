@@ -145,13 +145,10 @@ Backend-specific W8A8 coverage:
 
 - generic C: scalar int8 dot plus four-output-row matvec and classifier argmax
   tiles
-- NEON: signed int8 dot-product path with four-output-row matvec and classifier
-  argmax tiles when `__ARM_FEATURE_DOTPROD` is available
+- NEON: base integer SIMD path using signed int8 multiply, int16 products, and
+  int32 accumulation, with four-output-row matvec and classifier argmax tiles
 - AVX2/FMA: signed int8 dot via int8->int16 widening and `madd_epi16`, with
   four-output-row matvec and classifier argmax tiles
-- AVX-VNNI-INT8: direct signed*signed int8 dot-product tiles
-- AVX-VNNI and AVX512-VNNI: unsigned*signed dot-product instructions with a
-  correction term to preserve signed*signed int8 semantics
 
 W8A8 tuning notes from the JFK smoke path:
 
@@ -160,17 +157,15 @@ W8A8 tuning notes from the JFK smoke path:
   was previously parallel and regressed the 8-thread path.
 - Keep prompt/LSTM scalar row helpers out of the main encoder hot path unless
   the replacement is measured end to end. A wrapper-dispatched row-dot path was
-  slower on the smoke path despite using the same NEON dot-product primitive.
-- The local Apple Silicon target exposes `__ARM_FEATURE_DOTPROD`, but not an
-  i8mm feature macro. The NEON i8mm intrinsics exist in the compiler headers,
-  so an i8mm kernel should stay behind a feature guard until it can be built and
-  measured on a matching target.
+  slower on the smoke path despite using the same quantized row-dot boundary.
+- W8A8 int8 kernels intentionally stay on baseline architecture SIMD:
+  base NEON uses `vmull_s8` plus `vpadalq_s16`, and AVX2 uses signed
+  int8->int16 widening plus `madd_epi16`.
 - Scalar activation quantization is currently kept because Clang's optimized
   scalar loop was faster end to end than a hand-written NEON quantizer in the
   streaming benchmark.
-- The NEON Q8 four-output-row tile intentionally stays at one 16-byte dot
-  product step per loop. A 32-byte unroll increased register pressure and
-  regressed the smoke path.
+- The NEON Q8 four-output-row tile intentionally stays at one 16-byte int8
+  multiply/accumulate step per loop to keep register pressure modest.
 - Q8 runtime wrappers keep the temporary activation quantization buffer on the
   stack for input vectors up to 4096 elements, with heap fallback for larger
   inputs. This covers the dense Nemotron shapes while avoiding malloc/free in

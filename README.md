@@ -62,7 +62,7 @@ smaller model files and faster CPU experiments.
   LSTM, and vocabulary classifier weights as BF16 and runs them directly.
 - **Experimental W8A8 linear weights**: optional converter path stores the same
   dense weights as per-row int8 and dynamically quantizes activations for int8
-  dot-product inference.
+  matvec inference.
 - **Original streaming shape**: chunk size is controlled by Nemotron's
   cache-aware `att_context_size` right context.
 - **Incremental front end**: audio samples and mel frames are accepted
@@ -96,7 +96,7 @@ make debug    # AddressSanitizer debug build
 make mic      # build macOS live microphone tool
 make check-kernels  # compare native BF16/Q8 kernels against generic C
 make bench-kernels  # microbenchmark generic/native BF16/Q8 matvec/argmax paths
-make check-arch-syntax  # syntax-check NEON and AVX/VNNI kernel variants
+make check-arch-syntax  # syntax-check NEON and AVX kernel variants
 make clean
 ```
 
@@ -340,16 +340,13 @@ Backends:
   dense paths.
 - `nemotron_asr_kernels_neon.c`: ARM NEON implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
-  axpy, and pointwise streaming preconv. Q8 matvec/argmax uses NEON dot-product
-  when the target provides `__ARM_FEATURE_DOTPROD`.
+  axpy, pointwise streaming preconv, and base NEON Q8 matvec/argmax.
 - `nemotron_asr_kernels_avx.c`: AVX2/FMA implementations for f32 dot/matvec,
   BF16 row dot, two-row BF16 matvec/argmax range, attention score, residual
   axpy, pointwise streaming preconv, and Q8 matvec/argmax.
 - `nemotron_asr_kernels_avx.c` on AVX512F+BW: 16-lane BF16 conversion plus
   four-output-row BF16 matvec/argmax range.
-- `nemotron_asr_kernels_avx.c` with AVX-VNNI, AVX-VNNI-INT8, or AVX512-VNNI:
-  Q8 dot-product paths use the available VNNI family instruction shape, with a
-  signed-int8 correction where the hardware exposes unsigned*signed dot only.
+- Q8 paths use baseline NEON and AVX2 integer SIMD.
 
 The normal convolution, layer norm, softmax, activation, and model-binding
 utilities live in the shared runtime code.
@@ -369,8 +366,8 @@ Threading:
   rows at a time to reuse input vector loads.
 - AVX512F+BW computes BF16 matvec and classifier argmax ranges four output rows
   at a time.
-- Q8 matvec and classifier argmax use four-output-row dot-product tiles in the
-  generic, NEON, and AVX backends.
+- Q8 matvec and classifier argmax use four-output-row int8 tiles in the
+  generic, NEON, and AVX2 backends.
 - `make blas` uses BLAS only for larger row batches; streaming-size chunks stay
   on the native kernels.
 
@@ -381,7 +378,7 @@ Example JFK sample timing on an 8-core Apple Silicon laptop:
 | native, `-t 1` | 9.65 s | 1.14x |
 | native, `-t 8` | 3.60 s | 3.06x |
 | native, BF16 linear, `-t 8` | 2.16 s | 5.10x |
-| native, W8A8 linear, `-t 8` | 1.39 s | 7.92x |
+| native, W8A8 linear, `-t 8` | 2.35 s | 4.67x |
 | BLAS, `-t 8` | 3.63 s | 3.03x |
 | generic, `-t 8` | 4.73 s | 2.33x |
 | generic, BF16 linear, `-t 8` | 3.41 s | 3.22x |
