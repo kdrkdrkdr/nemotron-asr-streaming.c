@@ -42,6 +42,7 @@ check-arch-syntax:
 	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma nemotron_asr_kernels_avx.c
 	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavxvnni nemotron_asr_kernels_avx.c
 	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavxvnniint8 nemotron_asr_kernels_avx.c
+	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavx512f -mavx512bw nemotron_asr_kernels_avx.c
 	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma -mavx512f -mavx512bw -mavx512vnni nemotron_asr_kernels_avx.c
 
 ifeq ($(UNAME_S),Darwin)
