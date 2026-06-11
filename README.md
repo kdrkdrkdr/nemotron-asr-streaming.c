@@ -163,6 +163,8 @@ the audio through the same chunked streaming graph used by live input.
 ## Live Microphone
 
 Live microphone input is currently implemented for macOS through AudioQueue.
+By default, recognized text is written continuously to stdout as it is emitted.
+Chunk and token diagnostics are hidden unless `--trace` is enabled.
 
 ```bash
 make mic
@@ -210,6 +212,12 @@ actual microphone with `--device`.
 - `peak` moving means audio is reaching the runtime.
 
 Use `Ctrl-C` to stop and flush the final chunk.
+
+For chunk-level debugging:
+
+```bash
+./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b.bin --trace
+```
 
 ## Streaming Chunk Settings
 

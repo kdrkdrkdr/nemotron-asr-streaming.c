@@ -310,7 +310,8 @@ static void usage(const char *argv0) {
             "  --buffer-ms N      AudioQueue buffer size in milliseconds (default 80)\n"
             "  --queue-sec N      Max queued microphone audio before dropping oldest samples (default 20)\n"
             "  --meter            Print captured-audio queue and peak level every second\n"
-            "  --no-trace         Print transcript only, without chunk trace lines\n",
+            "  --trace            Print chunk/tokens trace lines and final timing summary\n"
+            "  --no-trace         Accepted for compatibility; transcript-only is the default\n",
             argv0);
 }
 
@@ -595,7 +596,7 @@ int main(int argc, char **argv) {
     int max_symbols = 10;
     int buffer_ms = 80;
     int queue_sec = 20;
-    int trace = 1;
+    int trace = 0;
     int meter = 0;
     int list_devices = 0;
     int n_threads = 0;
@@ -627,6 +628,8 @@ int main(int argc, char **argv) {
             if (parse_int(argv[++i], &queue_sec) != 0) { usage(argv[0]); return 2; }
         } else if (strcmp(argv[i], "--meter") == 0) {
             meter = 1;
+        } else if (strcmp(argv[i], "--trace") == 0) {
+            trace = 1;
         } else if (strcmp(argv[i], "--no-trace") == 0) {
             trace = 0;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -772,18 +775,22 @@ int main(int argc, char **argv) {
         text = nemo_rnnt_stream_finish(asr.rnnt);
         asr.rnnt = NULL;
     }
-    fprintf(stderr,
-            "\n\nFinal: %s\n"
-            "Audio: %.2fs, chunks=%d, enc_frames=%d, tokens=%d "
-            "(mel %.0f ms, encoder %.0f ms, decoder %.0f ms)\n",
-            text ? text : "",
-            (double)asr.samples_seen / (double)NEMO_SAMPLE_RATE,
-            asr.encoder_chunks,
-            ctx->perf_frames,
-            ctx->perf_tokens,
-            ctx->perf_mel_ms,
-            ctx->perf_encoder_ms,
-            ctx->perf_decoder_ms);
+    if (asr.printed_len > 0) {
+        fputc('\n', stdout);
+        fflush(stdout);
+    }
+    if (trace) {
+        fprintf(stderr,
+                "\nAudio: %.2fs, chunks=%d, enc_frames=%d, tokens=%d "
+                "(mel %.0f ms, encoder %.0f ms, decoder %.0f ms)\n",
+                (double)asr.samples_seen / (double)NEMO_SAMPLE_RATE,
+                asr.encoder_chunks,
+                ctx->perf_frames,
+                ctx->perf_tokens,
+                ctx->perf_mel_ms,
+                ctx->perf_encoder_ms,
+                ctx->perf_decoder_ms);
+    }
     free(text);
 
     live_asr_free(&asr);
