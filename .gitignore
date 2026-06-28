@@ -1,5 +1,7 @@
 *.o
 *.o.tmp
 *.exe
+*.pdb
+*.ilk
 nemotron_asr
 *.bin
