@@ -17,8 +17,6 @@ int nemo_argmax_q8p_range_generic(const int8_t *x_q8, float x_scale,
                                   float *best_val_out);
 float nemo_attention_score_f32_generic(const float *q, const float *bias_u, const float *k,
                                        const float *bias_v, const float *p, int n);
-void nemo_matvec_f32_generic(float *y, const float *x, const float *w, const float *b,
-                             int in_dim, int out_dim);
 void nemo_vec_axpy_inplace_generic(float *dst, const float *src, float alpha, int n);
 void nemo_fft512_power_f32_generic(float *power, const float *frame);
 void nemo_preconv_emit_f32_generic(float *out, const float *history, const float *w, const float *b,
@@ -32,7 +30,6 @@ void nemo_preconv_emit_f32_generic(float *out, const float *history, const float
 #define nemo_q8p_matvec_fused_impl nemo_q8p_matvec_fused_generic
 #define nemo_argmax_q8p_range_impl nemo_argmax_q8p_range_generic
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_generic
-#define nemo_matvec_f32_impl nemo_matvec_f32_generic
 #define nemo_vec_axpy_inplace_impl nemo_vec_axpy_inplace_generic
 #define nemo_fft512_power_f32_impl nemo_fft512_power_f32_generic
 #define nemo_preconv_emit_f32_impl nemo_preconv_emit_f32_generic
@@ -61,7 +58,6 @@ void nemo_preconv_emit_f32_neon(float *out, const float *history, const float *w
 #define nemo_q8p_matvec_fused_impl nemo_q8p_matvec_fused_neon
 #define nemo_argmax_q8p_range_impl nemo_argmax_q8p_range_neon
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_neon
-#define nemo_matvec_f32_impl nemo_matvec_f32_neon
 #define nemo_vec_axpy_inplace_impl nemo_vec_axpy_inplace_neon
 #define nemo_fft512_power_f32_impl nemo_fft512_power_f32_neon
 #define nemo_preconv_emit_f32_impl nemo_preconv_emit_f32_neon
@@ -90,7 +86,6 @@ void nemo_preconv_emit_f32_avx(float *out, const float *history, const float *w,
 #define nemo_q8p_matvec_fused_impl nemo_q8p_matvec_fused_avx
 #define nemo_argmax_q8p_range_impl nemo_argmax_q8p_range_avx
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_avx
-#define nemo_matvec_f32_impl nemo_matvec_f32_avx
 #define nemo_vec_axpy_inplace_impl nemo_vec_axpy_inplace_avx
 #define nemo_fft512_power_f32_impl nemo_fft512_power_f32_avx
 #define nemo_preconv_emit_f32_impl nemo_preconv_emit_f32_avx
@@ -100,7 +95,6 @@ void nemo_preconv_emit_f32_avx(float *out, const float *history, const float *w,
 #define nemo_q8p_matvec_fused_impl nemo_q8p_matvec_fused_generic
 #define nemo_argmax_q8p_range_impl nemo_argmax_q8p_range_generic
 #define nemo_attention_score_f32_impl nemo_attention_score_f32_generic
-#define nemo_matvec_f32_impl nemo_matvec_f32_generic
 #define nemo_vec_axpy_inplace_impl nemo_vec_axpy_inplace_generic
 #define nemo_fft512_power_f32_impl nemo_fft512_power_f32_generic
 #define nemo_preconv_emit_f32_impl nemo_preconv_emit_f32_generic

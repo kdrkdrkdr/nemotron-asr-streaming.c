@@ -156,14 +156,6 @@ float nemo_attention_score_f32_generic(const float *q, const float *bias_u, cons
     return sum;
 }
 
-void nemo_matvec_f32_generic(float *y, const float *x, const float *w, const float *b,
-                             int in_dim, int out_dim) {
-    for (int o = 0; o < out_dim; o++) {
-        const float *wr = w + (size_t)o * in_dim;
-        y[o] = dot_f32_generic_inline(x, wr, in_dim) + (b ? b[o] : 0.0f);
-    }
-}
-
 void nemo_vec_axpy_inplace_generic(float *dst, const float *src, float alpha, int n) {
     for (int i = 0; i < n; i++) dst[i] += alpha * src[i];
 }
