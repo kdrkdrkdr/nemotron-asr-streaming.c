@@ -18,43 +18,6 @@ float nemo_dot_f32_generic(const float *a, const float *b, int n) {
     return dot_f32_generic_inline(a, b, n);
 }
 
-static inline float bf16_to_f32_generic(uint16_t x) {
-    uint32_t bits = (uint32_t)x << 16;
-    float v;
-    memcpy(&v, &bits, sizeof(v));
-    return v;
-}
-
-float nemo_dot_bf16_f32_generic(const float *a, const uint16_t *b, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) sum += a[i] * bf16_to_f32_generic(b[i]);
-    return sum;
-}
-
-void nemo_bf16_matvec_fused_generic(float *y, const float *x, const uint16_t *w,
-                                    const float *b, int in_dim, int out_dim) {
-    for (int o = 0; o < out_dim; o++) {
-        y[o] = nemo_dot_bf16_f32_generic(x, w + (size_t)o * in_dim, in_dim) +
-               (b ? b[o] : 0.0f);
-    }
-}
-
-int nemo_argmax_bf16_range_generic(const float *x, const uint16_t *w, const float *b,
-                                   int in_dim, int start, int end, float *best_val_out) {
-    int best = start;
-    float best_val = -3.4028234663852886e38f;
-    for (int o = start; o < end; o++) {
-        float v = nemo_dot_bf16_f32_generic(x, w + (size_t)o * in_dim, in_dim) +
-                  (b ? b[o] : 0.0f);
-        if (v > best_val) {
-            best_val = v;
-            best = o;
-        }
-    }
-    if (best_val_out) *best_val_out = best_val;
-    return best;
-}
-
 static inline const int8_t *q8p_row_block_generic(const int8_t *w, int row,
                                                   int stride, int k) {
     const int tile = row >> 2;

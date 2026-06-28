@@ -37,7 +37,6 @@
 typedef struct {
     const char *name;
     const float *data;
-    const uint16_t *data_bf16;
     const int8_t *data_q8;
     const float *q8_scales;
     uint64_t q8_stride;

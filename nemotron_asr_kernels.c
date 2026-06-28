@@ -220,10 +220,6 @@ int nemo_get_threads(void) {
     return g_tp.n_threads;
 }
 
-static int nemo_weight_is_bf16(const nemo_weight_t *w) {
-    return w && w->dtype == NEMO_TENSOR_BF16 && w->bf16;
-}
-
 static int nemo_weight_is_q8(const nemo_weight_t *w) {
     return w && w->dtype == NEMO_TENSOR_Q8P && w->q8 && w->q8_scales;
 }
@@ -234,17 +230,6 @@ static int nemo_weight_q8_stride(const nemo_weight_t *w, int fallback) {
 
 static int nemo_weight_is_f32(const nemo_weight_t *w) {
     return w && w->dtype == NEMO_TENSOR_F32 && w->f32;
-}
-
-static float nemo_bf16_to_f32(uint16_t x) {
-    uint32_t bits = (uint32_t)x << 16;
-    float v;
-    memcpy(&v, &bits, sizeof(v));
-    return v;
-}
-
-static float nemo_dot_bf16_f32(const float *x, const uint16_t *w, int n) {
-    return nemo_dot_bf16_f32_impl(x, w, n);
 }
 
 static float nemo_quantize_q8_symmetric_padded(const float *x, int8_t *x_q8,
@@ -365,9 +350,6 @@ static float nemo_q8_dot_row(const float *x, const nemo_weight_t *w, int row, in
 }
 
 static float nemo_weight_dot_row(const float *x, const nemo_weight_t *w, int row, int stride, int n) {
-    if (nemo_weight_is_bf16(w)) {
-        return nemo_dot_bf16_f32(x, w->bf16 + (size_t)row * stride, n);
-    }
     if (nemo_weight_is_q8(w)) {
         return nemo_q8_dot_row(x, w, row, stride, n);
     }
@@ -376,7 +358,6 @@ static float nemo_weight_dot_row(const float *x, const nemo_weight_t *w, int row
 
 static float nemo_weight_value_row(const nemo_weight_t *w, int row, int stride, int col) {
     size_t idx = (size_t)row * stride + col;
-    if (nemo_weight_is_bf16(w)) return nemo_bf16_to_f32(w->bf16[idx]);
     if (nemo_weight_is_q8(w)) {
         int8_t qv = nemo_q8p_value(w->q8, row, nemo_weight_q8_stride(w, stride), col);
         return (float)qv * w->q8_scales[row];
@@ -403,16 +384,6 @@ typedef struct {
     int in_dim;
     int out_dim;
 } nemo_linear_weight_task_t;
-
-typedef struct {
-    float *y;
-    const float *x;
-    const uint16_t *w;
-    const float *b;
-    int rows;
-    int in_dim;
-    int out_dim;
-} nemo_bf16_linear_task_t;
 
 typedef struct {
     float *y;
@@ -462,20 +433,6 @@ static void nemo_linear_weight_worker(int tid, int n_threads, void *arg) {
         const float *xr = t->x + (size_t)r * t->in_dim;
         t->y[(size_t)r * t->out_dim + o] =
             nemo_weight_dot_row(xr, t->w, o, t->in_dim, t->in_dim) + (t->b ? t->b[o] : 0.0f);
-    }
-}
-
-static void nemo_bf16_linear_worker(int tid, int n_threads, void *arg) {
-    nemo_bf16_linear_task_t *t = (nemo_bf16_linear_task_t *)arg;
-    int start = (t->out_dim * tid) / n_threads;
-    int end = (t->out_dim * (tid + 1)) / n_threads;
-    if (start >= end) return;
-    for (int r = 0; r < t->rows; r++) {
-        nemo_bf16_matvec_fused_impl(t->y + (size_t)r * t->out_dim + start,
-                                    t->x + (size_t)r * t->in_dim,
-                                    t->w + (size_t)start * t->in_dim,
-                                    t->b ? t->b + start : NULL,
-                                    t->in_dim, end - start);
     }
 }
 
@@ -545,19 +502,6 @@ typedef struct {
     float *y1;
     float *y2;
     const float *x;
-    const uint16_t *w0;
-    const uint16_t *w1;
-    const uint16_t *w2;
-    int rows;
-    int in_dim;
-    int out_dim;
-} nemo_bf16_linear3_task_t;
-
-typedef struct {
-    float *y0;
-    float *y1;
-    float *y2;
-    const float *x;
     const nemo_weight_t *w0;
     const nemo_weight_t *w1;
     const nemo_weight_t *w2;
@@ -617,25 +561,6 @@ static void nemo_linear3_weight_worker(int tid, int n_threads, void *arg) {
             nemo_weight_dot_row(xr, t->w1, o, t->in_dim, t->in_dim);
         t->y2[(size_t)r * t->out_dim + o] =
             nemo_weight_dot_row(xr, t->w2, o, t->in_dim, t->in_dim);
-    }
-}
-
-static void nemo_bf16_linear3_worker(int tid, int n_threads, void *arg) {
-    nemo_bf16_linear3_task_t *t = (nemo_bf16_linear3_task_t *)arg;
-    int start = (t->out_dim * tid) / n_threads;
-    int end = (t->out_dim * (tid + 1)) / n_threads;
-    if (start >= end) return;
-    for (int r = 0; r < t->rows; r++) {
-        const float *xr = t->x + (size_t)r * t->in_dim;
-        nemo_bf16_matvec_fused_impl(t->y0 + (size_t)r * t->out_dim + start,
-                                    xr, t->w0 + (size_t)start * t->in_dim,
-                                    NULL, t->in_dim, end - start);
-        nemo_bf16_matvec_fused_impl(t->y1 + (size_t)r * t->out_dim + start,
-                                    xr, t->w1 + (size_t)start * t->in_dim,
-                                    NULL, t->in_dim, end - start);
-        nemo_bf16_matvec_fused_impl(t->y2 + (size_t)r * t->out_dim + start,
-                                    xr, t->w2 + (size_t)start * t->in_dim,
-                                    NULL, t->in_dim, end - start);
     }
 }
 
@@ -753,12 +678,6 @@ static void nemo_argmax_weight_worker(int tid, int n_threads, void *arg) {
     nemo_argmax_weight_task_t *t = (nemo_argmax_weight_task_t *)arg;
     int start = (t->out_dim * tid) / n_threads;
     int end = (t->out_dim * (tid + 1)) / n_threads;
-    if (nemo_weight_is_bf16(t->w)) {
-        t->best[tid] = nemo_argmax_bf16_range_impl(t->x, t->w->bf16, t->b,
-                                                   t->in_dim, start, end,
-                                                   &t->best_val[tid]);
-        return;
-    }
     if (nemo_weight_is_q8(t->w)) {
         int8_t stack_q8[NEMO_Q8_STACK_MAX];
         int q8_stride = nemo_weight_q8_stride(t->w, t->in_dim);
@@ -1049,15 +968,6 @@ void nemo_linear_weight(float *y, const float *x, const nemo_weight_t *w, const 
         return;
     }
     long long work = (long long)rows * (long long)in_dim * (long long)out_dim;
-    if (nemo_weight_is_bf16(w)) {
-        nemo_bf16_linear_task_t task = {y, x, w->bf16, b, rows, in_dim, out_dim};
-        if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
-            nemo_parallel_for(nemo_bf16_linear_worker, &task);
-            return;
-        }
-        nemo_bf16_linear_worker(0, 1, &task);
-        return;
-    }
     if (nemo_weight_is_q8(w)) {
         nemo_q8_linear_task_t task = {y, x, w, b, rows, in_dim, out_dim};
         if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
@@ -1122,17 +1032,6 @@ void nemo_linear3_nobias_weight(float *y0, float *y1, float *y2, const float *x,
         return;
     }
     long long work = (long long)rows * (long long)in_dim * (long long)out_dim * 3LL;
-    if (nemo_weight_is_bf16(w0) && nemo_weight_is_bf16(w1) && nemo_weight_is_bf16(w2)) {
-        nemo_bf16_linear3_task_t task = {y0, y1, y2, x,
-                                         w0->bf16, w1->bf16, w2->bf16,
-                                         rows, in_dim, out_dim};
-        if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
-            nemo_parallel_for(nemo_bf16_linear3_worker, &task);
-            return;
-        }
-        nemo_bf16_linear3_worker(0, 1, &task);
-        return;
-    }
     if (nemo_weight_is_q8(w0) && nemo_weight_is_q8(w1) && nemo_weight_is_q8(w2)) {
         nemo_q8_linear3_task_t task = {y0, y1, y2, x, w0, w1, w2, rows, in_dim, out_dim};
         if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {

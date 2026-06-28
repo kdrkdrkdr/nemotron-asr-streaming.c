@@ -46,12 +46,6 @@ static void pack_q8p(int8_t *packed, const int8_t *w, int in_dim, int out_dim) {
     }
 }
 
-static uint16_t f32_to_bf16(float v) {
-    uint32_t bits;
-    memcpy(&bits, &v, sizeof(bits));
-    return (uint16_t)(bits >> 16);
-}
-
 static int nearly_equal(float a, float b, float atol, float rtol) {
     float d = fabsf(a - b);
     float m = fmaxf(fabsf(a), fabsf(b));
@@ -166,64 +160,6 @@ static int check_q8p_matvec_case(int in_dim, int out_dim) {
     return 0;
 }
 
-static int check_bf16_matvec_case(int in_dim, int out_dim) {
-    float *x = (float *)malloc((size_t)in_dim * sizeof(float));
-    uint16_t *w = (uint16_t *)malloc((size_t)in_dim * (size_t)out_dim * sizeof(uint16_t));
-    float *bias = (float *)malloc((size_t)out_dim * sizeof(float));
-    float *yg = (float *)malloc((size_t)out_dim * sizeof(float));
-    float *yi = (float *)malloc((size_t)out_dim * sizeof(float));
-    if (!x || !w || !bias || !yg || !yi) {
-        free(x);
-        free(w);
-        free(bias);
-        free(yg);
-        free(yi);
-        return -1;
-    }
-
-    for (int i = 0; i < in_dim; i++) x[i] = next_f32(0.002f);
-    for (int i = 0; i < in_dim * out_dim; i++) w[i] = f32_to_bf16(next_f32(0.002f));
-    for (int o = 0; o < out_dim; o++) bias[o] = next_f32(0.001f);
-
-    nemo_bf16_matvec_fused_generic(yg, x, w, bias, in_dim, out_dim);
-    nemo_bf16_matvec_fused_impl(yi, x, w, bias, in_dim, out_dim);
-    for (int o = 0; o < out_dim; o++) {
-        if (!nearly_equal(yg[o], yi[o], 5e-4f, 5e-4f)) {
-            fprintf(stderr, "bf16 matvec mismatch in=%d out=%d o=%d generic=%g impl=%g\n",
-                    in_dim, out_dim, o, yg[o], yi[o]);
-            free(x);
-            free(w);
-            free(bias);
-            free(yg);
-            free(yi);
-            return -1;
-        }
-    }
-
-    int start = out_dim > 3 ? 1 : 0;
-    int end = out_dim > 3 ? out_dim - 1 : out_dim;
-    float vg = 0.0f, vi = 0.0f;
-    int bg = nemo_argmax_bf16_range_generic(x, w, bias, in_dim, start, end, &vg);
-    int bi = nemo_argmax_bf16_range_impl(x, w, bias, in_dim, start, end, &vi);
-    if (bg != bi || !nearly_equal(vg, vi, 5e-4f, 5e-4f)) {
-        fprintf(stderr, "bf16 argmax mismatch in=%d out=%d generic=(%d,%g) impl=(%d,%g)\n",
-                in_dim, out_dim, bg, vg, bi, vi);
-        free(x);
-        free(w);
-        free(bias);
-        free(yg);
-        free(yi);
-        return -1;
-    }
-
-    free(x);
-    free(w);
-    free(bias);
-    free(yg);
-    free(yi);
-    return 0;
-}
-
 int main(void) {
     static const int in_dims[] = {1, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129};
     static const int out_dims[] = {1, 3, 4, 5, 7, 16, 31};
@@ -231,7 +167,6 @@ int main(void) {
     for (size_t i = 0; i < sizeof(in_dims) / sizeof(in_dims[0]); i++) {
         for (size_t o = 0; o < sizeof(out_dims) / sizeof(out_dims[0]); o++) {
             if (check_q8p_matvec_case(in_dims[i], out_dims[o]) != 0) return 1;
-            if (check_bf16_matvec_case(in_dims[i], out_dims[o]) != 0) return 1;
         }
     }
 

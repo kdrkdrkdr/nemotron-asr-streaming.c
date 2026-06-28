@@ -96,10 +96,6 @@ static int bind_weight(const nemo_model_t *m, const char *name, nemo_weight_t *d
         dst->f32 = t->data;
         return 0;
     }
-    if (t->dtype == NEMO_TENSOR_BF16 && t->data_bf16) {
-        dst->bf16 = t->data_bf16;
-        return 0;
-    }
     if (t->dtype == NEMO_TENSOR_Q8P && t->data_q8 && t->q8_scales) {
         dst->q8 = t->data_q8;
         dst->q8_scales = t->q8_scales;
@@ -282,8 +278,7 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
         uint16_t name_len = rd_u16(&p);
         uint8_t ndims = *p++;
         uint8_t dtype = *p++;
-        if ((dtype != NEMO_TENSOR_F32 && dtype != NEMO_TENSOR_BF16 &&
-             dtype != NEMO_TENSOR_Q8P) ||
+        if ((dtype != NEMO_TENSOR_F32 && dtype != NEMO_TENSOR_Q8P) ||
             ndims > 4 || p + name_len + 4 * 8 + 8 > end) {
             fprintf(stderr, "nemotron: corrupt tensor table\n");
             nemo_model_free(model);
@@ -304,7 +299,6 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
         model->tensors[ti].dtype = dtype;
         model->tensors[ti].ndims = ndims;
         model->tensors[ti].data = dtype == NEMO_TENSOR_F32 ? (const float *)p : NULL;
-        model->tensors[ti].data_bf16 = dtype == NEMO_TENSOR_BF16 ? (const uint16_t *)p : NULL;
         if (dtype == NEMO_TENSOR_Q8P) {
             uint64_t rows = model->tensors[ti].dims[0];
             uint64_t cols = tensor_row_elems(ndims, model->tensors[ti].dims);
