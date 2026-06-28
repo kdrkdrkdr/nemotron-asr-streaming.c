@@ -1,3 +1,8 @@
+/*
+ * main.c - CLI entry point for the Nemotron 3.5 ASR runtime.
+ * Parses options, loads the model, and transcribes either a WAV file (-i) or a
+ * live raw-s16le 16 kHz mono stdin stream (--stdin).
+ */
 #include "nemotron_asr.h"
 
 #include <stdio.h>

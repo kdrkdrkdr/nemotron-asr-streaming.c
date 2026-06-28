@@ -1,3 +1,12 @@
+/*
+ * nemotron_asr_encoder.c - streaming FastConformer encoder.
+ * Causal depthwise-striding subsampling stem (factor 8), then 24 Conformer
+ * layers: half-step FFN1, relative-position multi-head self-attention (online
+ * softmax, per-layer K/V cache), depthwise conv module with causal GLU history,
+ * half-step FFN2, and output layer norm; followed by the language-prompt fusion
+ * MLP. Chunks are att_right+1 frames; per-layer attention and conv caches carry
+ * left context across chunks.
+ */
 #include "nemotron_asr.h"
 
 #include <math.h>

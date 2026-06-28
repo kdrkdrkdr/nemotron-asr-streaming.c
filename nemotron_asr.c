@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr.c - top-level transcription orchestration.
+ * Language-prompt table, context load/free, and the chunked streaming loop that
+ * feeds audio through the mel -> encoder -> RNN-T graph for both WAV-file and
+ * live stdin input.
+ */
 #include "nemotron_asr.h"
 
 #include <stdint.h>

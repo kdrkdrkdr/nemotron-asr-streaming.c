@@ -1,3 +1,10 @@
+/*
+ * nemotron_asr_kernels_avx.c - x86 AVX2/AVX-512 hot kernels.
+ * FMA f32 dot and packed Q8P int8 matvec/argmax (int8->int16 widening +
+ * madd_epi16, no VNNI), attention score, and AXPY. Compiled only under
+ * __AVX2__ && __FMA__, with AVX-512 paths where available; FFT falls back to
+ * the generic backend.
+ */
 #include "nemotron_asr_kernels_impl.h"
 
 #if defined(__AVX2__) && defined(__FMA__)

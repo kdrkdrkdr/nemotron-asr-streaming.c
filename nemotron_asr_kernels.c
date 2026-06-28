@@ -1,3 +1,11 @@
+/*
+ * nemotron_asr_kernels.c - compute kernels, dispatch, and threading.
+ * Persistent worker pool (pthread / Win32) with output-row parallelism, the
+ * typed-weight linear/matvec/argmax dispatchers (F32 and packed Q8P int8 with
+ * dynamic activation quantization), fused QKV / prompt / LSTM-gate paths, and
+ * scalar layer-norm/softmax/activation helpers. Architecture-specific hot
+ * kernels are selected in nemotron_asr_kernels_impl.h.
+ */
 #include "nemotron_asr.h"
 #include "nemotron_asr_kernels_impl.h"
 
@@ -1150,60 +1158,6 @@ void nemo_lstm_gates_weight(float *y, const float *x, const float *h,
         return;
     }
     nemo_lstm_gates_weight_worker(0, 1, &task);
-}
-
-static int conv_out_len(int n, int left, int right, int k, int stride) {
-    return (n + left + right - k) / stride + 1;
-}
-
-void nemo_conv2d(float *out, const float *in, const float *w, const float *b,
-                 int c_in, int c_out, int t_in, int f_in,
-                 int k, int stride, int left, int right, int groups) {
-    int t_out = conv_out_len(t_in, left, right, k, stride);
-    int f_out = conv_out_len(f_in, left, right, k, stride);
-    int in_per_group = c_in / groups;
-    int out_per_group = c_out / groups;
-    for (int oc = 0; oc < c_out; oc++) {
-        int g = oc / out_per_group;
-        int ic0 = g * in_per_group;
-        for (int ot = 0; ot < t_out; ot++) {
-            for (int of = 0; of < f_out; of++) {
-                float sum = b ? b[oc] : 0.0f;
-                for (int icg = 0; icg < in_per_group; icg++) {
-                    int ic = ic0 + icg;
-                    int w_ic = (groups == c_in && in_per_group == 1) ? 0 : icg;
-                    for (int kt = 0; kt < k; kt++) {
-                        int it = ot * stride + kt - left;
-                        if (it < 0 || it >= t_in) continue;
-                        for (int kf = 0; kf < k; kf++) {
-                            int iff = of * stride + kf - left;
-                            if (iff < 0 || iff >= f_in) continue;
-                            size_t iidx = ((size_t)ic * t_in + it) * f_in + iff;
-                            size_t widx = (((size_t)oc * in_per_group + w_ic) * k + kt) * k + kf;
-                            sum += in[iidx] * w[widx];
-                        }
-                    }
-                }
-                out[((size_t)oc * t_out + ot) * f_out + of] = sum;
-            }
-        }
-    }
-}
-
-void nemo_conv1d_depthwise_causal(float *out, const float *in, const float *w,
-                                  int t, int dim, int k, int left) {
-    for (int tt = 0; tt < t; tt++) {
-        for (int c = 0; c < dim; c++) {
-            float sum = 0.0f;
-            for (int kk = 0; kk < k; kk++) {
-                int src = tt + kk - left;
-                if (src >= 0 && src < t) {
-                    sum += in[(size_t)src * dim + c] * w[(size_t)c * k + kk];
-                }
-            }
-            out[(size_t)tt * dim + c] = sum;
-        }
-    }
 }
 
 void nemo_preconv_emit_f32(float *out, const float *history, const float *w, const float *b,

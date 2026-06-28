@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr_decoder.c - RNN-T greedy decoder.
+ * 2-layer LSTM prediction network with hidden/cell state preserved across
+ * chunks, the joint network (encoder + prediction projections, ReLU), and
+ * greedy argmax over the vocabulary classifier, emitting SentencePiece text.
+ */
 #include "nemotron_asr.h"
 
 #include <math.h>

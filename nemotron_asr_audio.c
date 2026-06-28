@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr_audio.c - audio front end.
+ * WAV loading (PCM s16, mono downmix, Kaiser windowed-sinc resampling to
+ * 16 kHz) and the streaming log-mel spectrogram (n_fft=512, win=400, hop=160,
+ * 128 mel bins).
+ */
 #include "nemotron_asr.h"
 
 #include <math.h>

@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr_kernels_generic.c - portable scalar reference kernels.
+ * f32 dot, packed Q8P int8 matvec/argmax (four-output-row tiles), attention
+ * score, AXPY, radix-2 FFT power spectrum, and pointwise preconv. Serves as the
+ * fallback backend and the numerical reference for the SIMD variants.
+ */
 #include "nemotron_asr_kernels_impl.h"
 
 #include <math.h>

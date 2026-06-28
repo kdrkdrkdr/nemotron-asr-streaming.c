@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr_model.c - model file loader.
+ * Memory-maps the converted .bin (mmap on POSIX, CreateFileMapping on Windows),
+ * parses the tensor table and vocabulary, and binds named tensors (F32 and
+ * packed Q8P int8) into the encoder/decoder/joint structures.
+ */
 #include "nemotron_asr.h"
 
 #include <errno.h>

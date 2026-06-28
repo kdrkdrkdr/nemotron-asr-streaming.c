@@ -34,11 +34,6 @@ int nemo_argmax_matvec_f32(const float *x, const float *w, const float *b,
                            int in_dim, int out_dim, float *best_val_out);
 void nemo_fft512_power_f32(float *power, const float *frame);
 
-void nemo_conv2d(float *out, const float *in, const float *w, const float *b,
-                 int c_in, int c_out, int t_in, int f_in,
-                 int k, int stride, int left, int right, int groups);
-void nemo_conv1d_depthwise_causal(float *out, const float *in, const float *w,
-                                  int t, int dim, int k, int left);
 void nemo_preconv_emit_f32(float *out, const float *history, const float *w, const float *b,
                            int out_start, int out_t, int total_t,
                            int c_in, int c_out, int f_in, int f_out,

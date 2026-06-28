@@ -1,3 +1,9 @@
+/*
+ * nemotron_asr_kernels_neon.c - ARM NEON hot kernels.
+ * Baseline-NEON f32 dot and packed Q8P int8 matvec/argmax (vmull_s8 +
+ * vpadalq_s16, no dotprod/i8mm), attention score, and AXPY. Compiled only under
+ * __ARM_NEON; FFT and preconv fall back to the generic backend.
+ */
 #include "nemotron_asr_kernels_impl.h"
 
 #ifdef __ARM_NEON
