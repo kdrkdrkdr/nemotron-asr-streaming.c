@@ -18,10 +18,11 @@
 
 struct nemo_mel_stream_t {
     const nemo_ctx_t *ctx;
-    float *samples;
-    int n_samples;
+    float *samples;          /* ring of buffered samples beginning at base_sample */
+    int n_buf;               /* live samples currently held in the ring */
     int cap_samples;
-    int next_frame;
+    long long base_sample;   /* absolute sample index of samples[0] */
+    long long next_frame;    /* next absolute mel frame to emit */
 };
 
 static uint16_t le16(const unsigned char *p) {
@@ -105,7 +106,7 @@ float *nemo_load_wav(const char *path, int *out_n_samples) {
     for (int i = 0; i < in_frames; i++) {
         int sum = 0;
         for (int c = 0; c < channels; c++) {
-            const unsigned char *s = pcm + (size_t)(i * channels + c) * 2;
+            const unsigned char *s = pcm + ((size_t)i * (size_t)channels + (size_t)c) * 2;
             sum += (int)(int16_t)le16(s);
         }
         mono[i] = (float)sum / (32768.0f * (float)channels);
@@ -158,27 +159,27 @@ float *nemo_load_wav(const char *path, int *out_n_samples) {
     return out;
 }
 
-static int mel_available_frames(int n_samples, int final) {
+static long long mel_available_frames(long long n_samples, int final) {
     if (final) {
-        int frames = n_samples / NEMO_HOP_LENGTH + 1;
+        long long frames = n_samples / NEMO_HOP_LENGTH + 1;
         return frames < 1 ? 1 : frames;
     }
-    int last = n_samples - 1 - (NEMO_WIN_LENGTH / 2 - 1);
+    long long last = n_samples - 1 - (NEMO_WIN_LENGTH / 2 - 1);
     if (last < 0) return 0;
     return last / NEMO_HOP_LENGTH + 1;
 }
 
-static void compute_mel_frame(const nemo_ctx_t *ctx, const float *samples, int n_samples,
-                              int frame_idx, float *out) {
+static void compute_mel_frame(const nemo_ctx_t *ctx, const float *samples, int n_buf,
+                              long long base_sample, long long frame_idx, float *out) {
     const nemo_encoder_t *e = &ctx->model.encoder;
     float power[NEMO_N_FFT / 2 + 1];
     float frame[NEMO_N_FFT];
-    int start = frame_idx * NEMO_HOP_LENGTH - NEMO_N_FFT / 2;
+    long long start = frame_idx * NEMO_HOP_LENGTH - NEMO_N_FFT / 2;
     int win_offset = (NEMO_N_FFT - NEMO_WIN_LENGTH) / 2;
     memset(frame, 0, sizeof(frame));
     for (int i = 0; i < NEMO_WIN_LENGTH; i++) {
-        int src = start + win_offset + i;
-        float s = (src >= 0 && src < n_samples) ? samples[src] : 0.0f;
+        long long rel = start + win_offset + i - base_sample;
+        float s = (rel >= 0 && rel < n_buf) ? samples[rel] : 0.0f;
         frame[win_offset + i] = s * e->window[i];
     }
     nemo_fft512_power_f32(power, frame);
@@ -200,34 +201,50 @@ int nemo_mel_stream_accept(nemo_mel_stream_t *s, const float *samples, int n_sam
                            int final, nemo_mel_chunk_cb cb, void *user) {
     if (!s || !cb || n_samples < 0) return -1;
     if (n_samples > 0) {
-        if (s->n_samples + n_samples > s->cap_samples) {
+        if (s->n_buf + n_samples > s->cap_samples) {
             int nc = s->cap_samples ? s->cap_samples * 2 : 8192;
-            while (nc < s->n_samples + n_samples) nc *= 2;
+            while (nc < s->n_buf + n_samples) nc *= 2;
             float *p = (float *)realloc(s->samples, (size_t)nc * sizeof(float));
             if (!p) return -1;
             s->samples = p;
             s->cap_samples = nc;
         }
-        memcpy(s->samples + s->n_samples, samples, (size_t)n_samples * sizeof(float));
-        s->n_samples += n_samples;
+        memcpy(s->samples + s->n_buf, samples, (size_t)n_samples * sizeof(float));
+        s->n_buf += n_samples;
     }
 
-    int avail = mel_available_frames(s->n_samples, final);
-    int new_frames = avail - s->next_frame;
+    long long total = s->base_sample + s->n_buf;
+    long long avail = mel_available_frames(total, final);
+    long long new_frames = avail - s->next_frame;
     if (new_frames > 0) {
         float *mel = nemo_alloc((size_t)new_frames * NEMO_MEL_BINS, sizeof(float));
         if (!mel) return -1;
-        for (int t = 0; t < new_frames; t++) {
+        for (long long t = 0; t < new_frames; t++) {
             float tmp[NEMO_MEL_BINS];
-            compute_mel_frame(s->ctx, s->samples, s->n_samples, s->next_frame + t, tmp);
+            compute_mel_frame(s->ctx, s->samples, s->n_buf, s->base_sample,
+                              s->next_frame + t, tmp);
             for (int m = 0; m < NEMO_MEL_BINS; m++) {
                 mel[(size_t)m * new_frames + t] = tmp[m];
             }
         }
         s->next_frame = avail;
-        int rc = cb(user, mel, new_frames, final);
+        int rc = cb(user, mel, (int)new_frames, final);
         free(mel);
         if (rc != 0) return -1;
+
+        /*
+         * Drop samples no future frame can reference (frame `avail` starts at
+         * avail*HOP - NFFT/2), so a long live --stdin session keeps a bounded
+         * buffer instead of growing with the whole stream.
+         */
+        long long keep_from = avail * NEMO_HOP_LENGTH - NEMO_N_FFT / 2;
+        if (keep_from > s->base_sample) {
+            long long shift = keep_from - s->base_sample;
+            if (shift > s->n_buf) shift = s->n_buf;
+            s->n_buf -= (int)shift;
+            memmove(s->samples, s->samples + shift, (size_t)s->n_buf * sizeof(float));
+            s->base_sample += shift;
+        }
     } else if (final) {
         if (cb(user, NULL, 0, final) != 0) return -1;
     }

@@ -253,7 +253,7 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
     const unsigned char *base = (const unsigned char *)map;
     const unsigned char *p = base;
     const unsigned char *end = base + model->map_size;
-    if ((size_t)(end - p) < 16 || memcmp(p, NEMO_MODEL_MAGIC, 7) != 0) {
+    if ((size_t)(end - p) < 24 || memcmp(p, NEMO_MODEL_MAGIC, 7) != 0) {
         fprintf(stderr, "nemotron: %s is not a nemotron-asr model bin\n", path);
         nemo_model_free(model);
         return -1;
@@ -287,12 +287,13 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
             return -1;
         }
         char *name = dup_bytes(p, name_len);
+        if (!name) { nemo_model_free(model); return -1; }
         p += name_len;
         for (int d = 0; d < 4; d++) model->tensors[ti].dims[d] = rd_u64(&p);
         uint64_t nbytes = rd_u64(&p);
         p = align64(base, p);
-        if (p + nbytes > end) {
-            fprintf(stderr, "nemotron: tensor %s overruns file\n", name ? name : "?");
+        if (p > end || nbytes > (uint64_t)(end - p)) {
+            fprintf(stderr, "nemotron: tensor %s overruns file\n", name);
             free(name);
             nemo_model_free(model);
             return -1;

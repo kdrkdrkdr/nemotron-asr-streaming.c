@@ -84,7 +84,8 @@ int main(int argc, char **argv) {
         nemo_free(ctx);
         return 1;
     }
-    if (att_right != 0 && att_right != 1 && att_right != 3 && att_right != 6 && att_right != 13) {
+    if (!model_info &&
+        att_right != 0 && att_right != 1 && att_right != 3 && att_right != 6 && att_right != 13) {
         fprintf(stderr, "nemotron: --att-right must be one of 0,1,3,6,13\n");
         nemo_free(ctx);
         return 1;
