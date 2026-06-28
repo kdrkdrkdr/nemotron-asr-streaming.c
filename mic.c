@@ -303,7 +303,7 @@ static void usage(const char *argv0) {
             "  -m <file>          Converted Nemotron model bin\n"
             "  --list-devices     List macOS input devices and exit\n"
             "  --device X         Input device index, AudioDeviceID, UID, or exact name\n"
-            "  -t <n>             Number of worker threads (default: all CPUs, max 16)\n"
+            "  -t <n>             Number of worker threads (default 1, max 16)\n"
             "  -l <lang>          Language prompt, e.g. en-US, ko-KR, auto (default auto)\n"
             "  --att-right N      Right context in 80 ms encoder frames: 0,1,3,6,13 (default 3)\n"
             "  --push-frames N    Microphone push size in 80 ms encoder-frame units (default att_right+1)\n"
@@ -677,7 +677,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "nemotron_mic: -t must be >= 1\n");
         return 2;
     }
-    if (n_threads == 0) n_threads = nemo_get_num_cpus();
+    if (n_threads == 0) n_threads = 1;
     nemo_set_threads(n_threads);
     if (push_frames <= 0) push_frames = att_right + 1;
     if (push_frames < 1) {
