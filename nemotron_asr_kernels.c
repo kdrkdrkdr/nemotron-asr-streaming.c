@@ -29,14 +29,6 @@
 #endif
 #endif
 
-#ifdef USE_BLAS
-#ifdef __APPLE__
-#include <Accelerate/Accelerate.h>
-#else
-#include <cblas.h>
-#endif
-#endif
-
 /*
  * Thread / sync abstraction: pthread on POSIX, Win32 SRWLOCK + condition
  * variables on Windows. SRWLOCK/CONDITION_VARIABLE both support static
@@ -72,7 +64,6 @@ typedef pthread_cond_t nemo_cond_t;
 
 #define NEMO_MAX_THREADS 16
 #define NEMO_PARALLEL_WORK_MIN 262144
-#define NEMO_BLAS_ROWS_MIN 16
 #define NEMO_Q8_STACK_MAX 4096
 #define NEMO_Q8_PREQ_STACK_MAX 65536
 #define NEMO_Q8_SCALE_STACK_MAX 512
@@ -174,22 +165,6 @@ static void nemo_parallel_for(nemo_parallel_fn_t fn, void *arg) {
     NEMO_MUTEX_UNLOCK(&g_tp.mutex);
 }
 
-int nemo_get_num_cpus(void) {
-#if defined(_WIN32)
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
-#elif defined(__APPLE__)
-    int n = 0;
-    size_t len = sizeof(n);
-    if (sysctlbyname("hw.ncpu", &n, &len, NULL, 0) != 0) return 1;
-    return n > 0 ? n : 1;
-#else
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    return n > 0 ? (int)n : 1;
-#endif
-}
-
 void nemo_set_threads(int n_threads) {
     if (n_threads < 1) n_threads = 1;
     if (n_threads > NEMO_MAX_THREADS) n_threads = NEMO_MAX_THREADS;
@@ -222,10 +197,6 @@ void nemo_set_threads(int n_threads) {
             return;
         }
     }
-}
-
-int nemo_get_threads(void) {
-    return g_tp.n_threads;
 }
 
 static int nemo_weight_is_q8(const nemo_weight_t *w) {
@@ -613,25 +584,6 @@ static void nemo_q8_linear3_preq_worker(int tid, int n_threads, void *arg) {
 }
 
 typedef struct {
-    float *y;
-    const float *x;
-    const float *w;
-    const float *b;
-    int in_dim;
-    int out_dim;
-} nemo_matvec_task_t;
-
-static void nemo_matvec_worker(int tid, int n_threads, void *arg) {
-    nemo_matvec_task_t *t = (nemo_matvec_task_t *)arg;
-    int start = (t->out_dim * tid) / n_threads;
-    int end = (t->out_dim * (tid + 1)) / n_threads;
-    for (int o = start; o < end; o++) {
-        const float *wr = t->w + (size_t)o * t->in_dim;
-        t->y[o] = nemo_dot_f32_impl(t->x, wr, t->in_dim) + (t->b ? t->b[o] : 0.0f);
-    }
-}
-
-typedef struct {
     const float *x;
     const float *w;
     const float *b;
@@ -927,21 +879,6 @@ double nemo_time_ms(void) {
 void nemo_linear(float *y, const float *x, const float *w, const float *b,
                  int rows, int in_dim, int out_dim) {
     long long work = (long long)rows * (long long)in_dim * (long long)out_dim;
-#ifdef USE_BLAS
-    if (rows >= NEMO_BLAS_ROWS_MIN && work >= NEMO_PARALLEL_WORK_MIN) {
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                    rows, out_dim, in_dim,
-                    1.0f, x, in_dim, w, in_dim,
-                    0.0f, y, out_dim);
-        if (b) {
-            for (int r = 0; r < rows; r++) {
-                float *yr = y + (size_t)r * out_dim;
-                for (int o = 0; o < out_dim; o++) yr[o] += b[o];
-            }
-        }
-        return;
-    }
-#endif
     if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
         nemo_linear_task_t task = {y, x, w, b, rows, in_dim, out_dim};
         nemo_parallel_for(nemo_linear_worker, &task);
@@ -1167,17 +1104,6 @@ float nemo_attention_score_f32(const float *q, const float *bias_u, const float 
     return nemo_attention_score_f32_impl(q, bias_u, k, bias_v, p, n);
 }
 
-void nemo_matvec_f32(float *y, const float *x, const float *w, const float *b,
-                     int in_dim, int out_dim) {
-    long long work = (long long)in_dim * (long long)out_dim;
-    if (g_tp.n_threads > 1 && work >= NEMO_PARALLEL_WORK_MIN) {
-        nemo_matvec_task_t task = {y, x, w, b, in_dim, out_dim};
-        nemo_parallel_for(nemo_matvec_worker, &task);
-        return;
-    }
-    nemo_matvec_f32_impl(y, x, w, b, in_dim, out_dim);
-}
-
 int nemo_argmax_matvec_f32(const float *x, const float *w, const float *b,
                            int in_dim, int out_dim, float *best_val_out) {
     long long work = (long long)in_dim * (long long)out_dim;
@@ -1277,18 +1203,6 @@ void nemo_layer_norm(float *y, const float *x, const float *w, const float *b,
     }
 }
 
-void nemo_softmax(float *x, int n) {
-    float mx = x[0];
-    for (int i = 1; i < n; i++) if (x[i] > mx) mx = x[i];
-    double sum = 0.0;
-    for (int i = 0; i < n; i++) {
-        x[i] = expf(x[i] - mx);
-        sum += x[i];
-    }
-    float inv = sum > 0.0 ? (float)(1.0 / sum) : 0.0f;
-    for (int i = 0; i < n; i++) x[i] *= inv;
-}
-
 float nemo_sigmoid(float x) {
     if (x >= 0.0f) {
         float z = expf(-x);
@@ -1300,8 +1214,4 @@ float nemo_sigmoid(float x) {
 
 void nemo_swish(float *x, int n) {
     for (int i = 0; i < n; i++) x[i] = x[i] * nemo_sigmoid(x[i]);
-}
-
-void nemo_relu(float *x, int n) {
-    for (int i = 0; i < n; i++) if (x[i] < 0.0f) x[i] = 0.0f;
 }

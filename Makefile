@@ -46,7 +46,7 @@ MIC_OBJS = mic.o $(RUNTIME_OBJS)
 KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 KERNEL_BENCH_OBJS = kernel_bench.o nemotron_asr_kernels.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 
-.PHONY: all clean debug generic blas mic check-kernels bench-kernels check-arch-syntax
+.PHONY: all clean debug generic mic check-kernels bench-kernels check-arch-syntax
 
 all: $(TARGET)
 
@@ -90,15 +90,6 @@ debug: clean $(TARGET)
 generic: CFLAGS = -O3 -std=c11 -Wall -Wextra -pedantic -ffast-math -DNEMO_FORCE_GENERIC
 generic: LDFLAGS = -lm -lpthread
 generic: clean $(TARGET)
-
-ifeq ($(UNAME_S),Darwin)
-blas: CFLAGS = -O3 -std=c11 -Wall -Wextra -pedantic -march=native -ffast-math -flto -DUSE_BLAS -DACCELERATE_NEW_LAPACK
-blas: LDFLAGS = -lm -lpthread -flto -framework Accelerate
-else
-blas: CFLAGS = -O3 -std=c11 -Wall -Wextra -pedantic -march=native -ffast-math -flto -DUSE_BLAS -DUSE_OPENBLAS -I/usr/include/openblas
-blas: LDFLAGS = -lm -lpthread -flto -lopenblas
-endif
-blas: clean $(TARGET)
 
 clean:
 	rm -f $(OBJS) kernel_check.o kernel_bench.o mic.o $(KERNEL_BENCH_TARGET) $(KERNEL_CHECK_TARGET) $(MIC_TARGET) $(TARGET)

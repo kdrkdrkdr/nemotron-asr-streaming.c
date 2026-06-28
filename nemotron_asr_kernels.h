@@ -21,15 +21,11 @@ typedef struct {
 
 float *nemo_alloc(size_t count, size_t elem);
 double nemo_time_ms(void);
-int nemo_get_num_cpus(void);
 void nemo_set_threads(int n_threads);
-int nemo_get_threads(void);
 
 float nemo_dot_f32(const float *a, const float *b, int n);
 float nemo_attention_score_f32(const float *q, const float *bias_u, const float *k,
                                const float *bias_v, const float *p, int n);
-void nemo_matvec_f32(float *y, const float *x, const float *w, const float *b,
-                     int in_dim, int out_dim);
 int nemo_argmax_matvec_f32(const float *x, const float *w, const float *b,
                            int in_dim, int out_dim, float *best_val_out);
 void nemo_fft512_power_f32(float *power, const float *frame);
@@ -74,9 +70,7 @@ int nemo_argmax_matvec_weight(const float *x, const nemo_weight_t *w, const floa
                               int in_dim, int out_dim, float *best_val_out);
 void nemo_layer_norm(float *y, const float *x, const float *w, const float *b,
                      int rows, int dim, float eps);
-void nemo_softmax(float *x, int n);
 void nemo_swish(float *x, int n);
-void nemo_relu(float *x, int n);
 float nemo_sigmoid(float x);
 
 #endif

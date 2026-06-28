@@ -15,7 +15,6 @@
 #include <string.h>
 
 #define LN_EPS 1.0e-5f
-#define NEG_INF -10000.0f
 #define CONV_LEFT 8
 
 typedef struct {
