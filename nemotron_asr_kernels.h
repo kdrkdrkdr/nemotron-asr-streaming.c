@@ -12,7 +12,6 @@
 #define NEMO_TENSOR_Q8P  4u
 
 typedef struct {
-    const float *f32;
     const int8_t *q8;
     const float *q8_scales;
     uint32_t q8_stride;
@@ -26,8 +25,6 @@ void nemo_set_threads(int n_threads);
 float nemo_dot_f32(const float *a, const float *b, int n);
 float nemo_attention_score_f32(const float *q, const float *bias_u, const float *k,
                                const float *bias_v, const float *p, int n);
-int nemo_argmax_matvec_f32(const float *x, const float *w, const float *b,
-                           int in_dim, int out_dim, float *best_val_out);
 void nemo_fft512_power_f32(float *power, const float *frame);
 
 void nemo_preconv_emit_f32(float *out, const float *history, const float *w, const float *b,
@@ -37,31 +34,17 @@ void nemo_preconv_emit_f32(float *out, const float *history, const float *w, con
 
 void nemo_vec_axpy_inplace(float *dst, const float *src, float alpha, int n);
 
-void nemo_linear(float *y, const float *x, const float *w, const float *b,
-                 int rows, int in_dim, int out_dim);
-void nemo_linear_nobias(float *y, const float *x, const float *w,
-                        int rows, int in_dim, int out_dim);
 void nemo_linear_weight(float *y, const float *x, const nemo_weight_t *w, const float *b,
                         int rows, int in_dim, int out_dim);
 void nemo_linear_nobias_weight(float *y, const float *x, const nemo_weight_t *w,
                                int rows, int in_dim, int out_dim);
-void nemo_linear3_nobias(float *y0, float *y1, float *y2, const float *x,
-                         const float *w0, const float *w1, const float *w2,
-                         int rows, int in_dim, int out_dim);
 void nemo_linear3_nobias_weight(float *y0, float *y1, float *y2, const float *x,
                                 const nemo_weight_t *w0, const nemo_weight_t *w1,
                                 const nemo_weight_t *w2,
                                 int rows, int in_dim, int out_dim);
-void nemo_prompt_linear_relu(float *y, const float *x, const float *w, const float *b,
-                             int rows, int in_dim, int prompt_dim, int prompt_id,
-                             int out_dim);
 void nemo_prompt_linear_relu_weight(float *y, const float *x, const nemo_weight_t *w,
                                     const float *b, int rows, int in_dim,
                                     int prompt_dim, int prompt_id, int out_dim);
-void nemo_lstm_gates_f32(float *y, const float *x, const float *h,
-                         const float *w_ih, const float *w_hh,
-                         const float *b_ih, const float *b_hh,
-                         int dim, int out_dim);
 void nemo_lstm_gates_weight(float *y, const float *x, const float *h,
                             const nemo_weight_t *w_ih, const nemo_weight_t *w_hh,
                             const float *b_ih, const float *b_hh,

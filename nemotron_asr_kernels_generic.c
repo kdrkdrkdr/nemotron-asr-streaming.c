@@ -164,22 +164,6 @@ void nemo_matvec_f32_generic(float *y, const float *x, const float *w, const flo
     }
 }
 
-int nemo_argmax_matvec_f32_generic(const float *x, const float *w, const float *b,
-                                   int in_dim, int out_dim, float *best_val_out) {
-    int best = 0;
-    float best_val = -3.4028234663852886e38f;
-    for (int o = 0; o < out_dim; o++) {
-        const float *wr = w + (size_t)o * in_dim;
-        float v = dot_f32_generic_inline(x, wr, in_dim) + (b ? b[o] : 0.0f);
-        if (v > best_val) {
-            best_val = v;
-            best = o;
-        }
-    }
-    if (best_val_out) *best_val_out = best_val;
-    return best;
-}
-
 void nemo_vec_axpy_inplace_generic(float *dst, const float *src, float alpha, int n) {
     for (int i = 0; i < n; i++) dst[i] += alpha * src[i];
 }

@@ -98,17 +98,13 @@ static int bind_weight(const nemo_model_t *m, const char *name, nemo_weight_t *d
     }
     memset(dst, 0, sizeof(*dst));
     dst->dtype = t->dtype;
-    if (t->dtype == NEMO_TENSOR_F32 && t->data) {
-        dst->f32 = t->data;
-        return 0;
-    }
     if (t->dtype == NEMO_TENSOR_Q8P && t->data_q8 && t->q8_scales) {
         dst->q8 = t->data_q8;
         dst->q8_scales = t->q8_scales;
         dst->q8_stride = (uint32_t)t->q8_stride;
         return 0;
     }
-    fprintf(stderr, "nemotron: tensor %s has unsupported weight dtype %u\n", name, t->dtype);
+    fprintf(stderr, "nemotron: tensor %s is not Q8P (dtype %u)\n", name, t->dtype);
     return -1;
 }
 
