@@ -2,22 +2,64 @@
 #include "nemotron_asr_kernels_impl.h"
 
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <process.h>
+#else
+#include <pthread.h>
 #include <sys/time.h>
 #ifdef __APPLE__
 #include <sys/sysctl.h>
 #else
 #include <unistd.h>
 #endif
+#endif
+
 #ifdef USE_BLAS
 #ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
 #else
 #include <cblas.h>
 #endif
+#endif
+
+/*
+ * Thread / sync abstraction: pthread on POSIX, Win32 SRWLOCK + condition
+ * variables on Windows. SRWLOCK/CONDITION_VARIABLE both support static
+ * initializers, so the global pool struct keeps the same shape on both.
+ */
+#ifdef _WIN32
+typedef HANDLE nemo_thread_t;
+typedef SRWLOCK nemo_mutex_t;
+typedef CONDITION_VARIABLE nemo_cond_t;
+#define NEMO_MUTEX_INIT SRWLOCK_INIT
+#define NEMO_COND_INIT CONDITION_VARIABLE_INIT
+#define NEMO_MUTEX_LOCK(m) AcquireSRWLockExclusive(m)
+#define NEMO_MUTEX_UNLOCK(m) ReleaseSRWLockExclusive(m)
+#define NEMO_COND_WAIT(c, m) SleepConditionVariableSRW((c), (m), INFINITE, 0)
+#define NEMO_COND_SIGNAL(c) WakeConditionVariable(c)
+#define NEMO_COND_BROADCAST(c) WakeAllConditionVariable(c)
+#define NEMO_THREAD_RET unsigned __stdcall
+#define NEMO_THREAD_RETURN_VAL 0u
+#else
+typedef pthread_t nemo_thread_t;
+typedef pthread_mutex_t nemo_mutex_t;
+typedef pthread_cond_t nemo_cond_t;
+#define NEMO_MUTEX_INIT PTHREAD_MUTEX_INITIALIZER
+#define NEMO_COND_INIT PTHREAD_COND_INITIALIZER
+#define NEMO_MUTEX_LOCK(m) pthread_mutex_lock(m)
+#define NEMO_MUTEX_UNLOCK(m) pthread_mutex_unlock(m)
+#define NEMO_COND_WAIT(c, m) pthread_cond_wait((c), (m))
+#define NEMO_COND_SIGNAL(c) pthread_cond_signal(c)
+#define NEMO_COND_BROADCAST(c) pthread_cond_broadcast(c)
+#define NEMO_THREAD_RET void *
+#define NEMO_THREAD_RETURN_VAL NULL
 #endif
 
 #define NEMO_MAX_THREADS 16
@@ -30,7 +72,7 @@
 typedef void (*nemo_parallel_fn_t)(int tid, int n_threads, void *arg);
 
 static struct {
-    pthread_t threads[NEMO_MAX_THREADS - 1];
+    nemo_thread_t threads[NEMO_MAX_THREADS - 1];
     int tids[NEMO_MAX_THREADS - 1];
     int n_threads;
     int shutdown;
@@ -39,46 +81,66 @@ static struct {
     void *arg;
     int generation;
 
-    pthread_mutex_t mutex;
-    pthread_cond_t cond_work;
-    pthread_cond_t cond_done;
+    nemo_mutex_t mutex;
+    nemo_cond_t cond_work;
+    nemo_cond_t cond_done;
     int n_done;
 } g_tp = {
     .n_threads = 1,
     .shutdown = 0,
     .generation = 0,
-    .mutex = PTHREAD_MUTEX_INITIALIZER,
-    .cond_work = PTHREAD_COND_INITIALIZER,
-    .cond_done = PTHREAD_COND_INITIALIZER,
+    .mutex = NEMO_MUTEX_INIT,
+    .cond_work = NEMO_COND_INIT,
+    .cond_done = NEMO_COND_INIT,
 };
 
-static void *nemo_worker_loop(void *arg) {
+static NEMO_THREAD_RET nemo_worker_loop(void *arg) {
     int tid = *(int *)arg;
     int my_gen = 0;
 
     for (;;) {
-        pthread_mutex_lock(&g_tp.mutex);
+        NEMO_MUTEX_LOCK(&g_tp.mutex);
         while (g_tp.generation == my_gen && !g_tp.shutdown) {
-            pthread_cond_wait(&g_tp.cond_work, &g_tp.mutex);
+            NEMO_COND_WAIT(&g_tp.cond_work, &g_tp.mutex);
         }
         if (g_tp.shutdown) {
-            pthread_mutex_unlock(&g_tp.mutex);
-            return NULL;
+            NEMO_MUTEX_UNLOCK(&g_tp.mutex);
+            return NEMO_THREAD_RETURN_VAL;
         }
         my_gen = g_tp.generation;
         nemo_parallel_fn_t fn = g_tp.fn;
         void *a = g_tp.arg;
         int nt = g_tp.n_threads;
-        pthread_mutex_unlock(&g_tp.mutex);
+        NEMO_MUTEX_UNLOCK(&g_tp.mutex);
 
         fn(tid, nt, a);
 
-        pthread_mutex_lock(&g_tp.mutex);
+        NEMO_MUTEX_LOCK(&g_tp.mutex);
         if (++g_tp.n_done >= g_tp.n_threads - 1) {
-            pthread_cond_signal(&g_tp.cond_done);
+            NEMO_COND_SIGNAL(&g_tp.cond_done);
         }
-        pthread_mutex_unlock(&g_tp.mutex);
+        NEMO_MUTEX_UNLOCK(&g_tp.mutex);
     }
+}
+
+static int nemo_thread_create(nemo_thread_t *t, int *tid_arg) {
+#ifdef _WIN32
+    uintptr_t h = _beginthreadex(NULL, 0, nemo_worker_loop, tid_arg, 0, NULL);
+    if (h == 0) return -1;
+    *t = (HANDLE)h;
+    return 0;
+#else
+    return pthread_create(t, NULL, nemo_worker_loop, tid_arg);
+#endif
+}
+
+static void nemo_thread_join(nemo_thread_t t) {
+#ifdef _WIN32
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+#else
+    pthread_join(t, NULL);
+#endif
 }
 
 static void nemo_parallel_for(nemo_parallel_fn_t fn, void *arg) {
@@ -87,25 +149,29 @@ static void nemo_parallel_for(nemo_parallel_fn_t fn, void *arg) {
         return;
     }
 
-    pthread_mutex_lock(&g_tp.mutex);
+    NEMO_MUTEX_LOCK(&g_tp.mutex);
     g_tp.fn = fn;
     g_tp.arg = arg;
     g_tp.n_done = 0;
     g_tp.generation++;
-    pthread_cond_broadcast(&g_tp.cond_work);
-    pthread_mutex_unlock(&g_tp.mutex);
+    NEMO_COND_BROADCAST(&g_tp.cond_work);
+    NEMO_MUTEX_UNLOCK(&g_tp.mutex);
 
     fn(0, g_tp.n_threads, arg);
 
-    pthread_mutex_lock(&g_tp.mutex);
+    NEMO_MUTEX_LOCK(&g_tp.mutex);
     while (g_tp.n_done < g_tp.n_threads - 1) {
-        pthread_cond_wait(&g_tp.cond_done, &g_tp.mutex);
+        NEMO_COND_WAIT(&g_tp.cond_done, &g_tp.mutex);
     }
-    pthread_mutex_unlock(&g_tp.mutex);
+    NEMO_MUTEX_UNLOCK(&g_tp.mutex);
 }
 
 int nemo_get_num_cpus(void) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+#elif defined(__APPLE__)
     int n = 0;
     size_t len = sizeof(n);
     if (sysctlbyname("hw.ncpu", &n, &len, NULL, 0) != 0) return 1;
@@ -122,20 +188,20 @@ void nemo_set_threads(int n_threads) {
     if (n_threads == g_tp.n_threads) return;
 
     if (g_tp.n_threads > 1) {
-        pthread_mutex_lock(&g_tp.mutex);
+        NEMO_MUTEX_LOCK(&g_tp.mutex);
         g_tp.shutdown = 1;
-        pthread_cond_broadcast(&g_tp.cond_work);
-        pthread_mutex_unlock(&g_tp.mutex);
+        NEMO_COND_BROADCAST(&g_tp.cond_work);
+        NEMO_MUTEX_UNLOCK(&g_tp.mutex);
         for (int i = 0; i < g_tp.n_threads - 1; i++) {
-            pthread_join(g_tp.threads[i], NULL);
+            nemo_thread_join(g_tp.threads[i]);
         }
-        pthread_mutex_lock(&g_tp.mutex);
+        NEMO_MUTEX_LOCK(&g_tp.mutex);
         g_tp.shutdown = 0;
         g_tp.generation = 0;
         g_tp.fn = NULL;
         g_tp.arg = NULL;
         g_tp.n_done = 0;
-        pthread_mutex_unlock(&g_tp.mutex);
+        NEMO_MUTEX_UNLOCK(&g_tp.mutex);
     }
 
     g_tp.n_threads = n_threads;
@@ -143,7 +209,7 @@ void nemo_set_threads(int n_threads) {
 
     for (int i = 0; i < n_threads - 1; i++) {
         g_tp.tids[i] = i + 1;
-        if (pthread_create(&g_tp.threads[i], NULL, nemo_worker_loop, &g_tp.tids[i]) != 0) {
+        if (nemo_thread_create(&g_tp.threads[i], &g_tp.tids[i]) != 0) {
             g_tp.n_threads = i + 1;
             return;
         }
@@ -929,9 +995,16 @@ float *nemo_alloc(size_t count, size_t elem) {
 }
 
 double nemo_time_ms(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq, ctr;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&ctr);
+    return (double)ctr.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+#endif
 }
 
 void nemo_linear(float *y, const float *x, const float *w, const float *b,

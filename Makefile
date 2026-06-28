@@ -1,14 +1,43 @@
+UNAME_S := $(shell uname -s)
+
+# Windows (MSYS2/MinGW shell): clang targeting the MSVC runtime builds a native
+# .exe. The Win32 platform paths replace pthread/mmap, so no -lm/-lpthread and
+# no -pedantic/-flto (windows.h is noisy under -pedantic).
+NEMO_WINDOWS :=
+ifneq (,$(findstring MINGW,$(UNAME_S)))
+NEMO_WINDOWS := 1
+endif
+ifneq (,$(findstring MSYS,$(UNAME_S)))
+NEMO_WINDOWS := 1
+endif
+ifneq (,$(findstring CYGWIN,$(UNAME_S)))
+NEMO_WINDOWS := 1
+endif
+
+ifeq ($(NEMO_WINDOWS),1)
+# GNU make predefines CC=cc (origin "default"), so ?= would not switch it.
+# Only force clang when the user has not chosen a compiler themselves.
+ifeq ($(origin CC),default)
+CC := clang
+endif
+CFLAGS ?= -O3 -std=c11 -Wall -Wextra -march=native -ffast-math -D_CRT_SECURE_NO_WARNINGS
+LDFLAGS ?=
+EXE := .exe
+else
 CC ?= cc
 CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -march=native -ffast-math -flto
 LDFLAGS ?= -lm -lpthread -flto
+EXE :=
+endif
+
 SYNTAX_ARM_TARGET ?= arm64-apple-macos13
 SYNTAX_X86_TARGET ?= x86_64-apple-macos13
 SYNTAX_CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -ffast-math -fsyntax-only
 
-TARGET = nemotron_asr
-MIC_TARGET = nemotron_asr_mic
-KERNEL_CHECK_TARGET = nemotron_kernel_check
-KERNEL_BENCH_TARGET = nemotron_kernel_bench
+TARGET = nemotron_asr$(EXE)
+MIC_TARGET = nemotron_asr_mic$(EXE)
+KERNEL_CHECK_TARGET = nemotron_kernel_check$(EXE)
+KERNEL_BENCH_TARGET = nemotron_kernel_bench$(EXE)
 RUNTIME_SRCS = nemotron_asr.c nemotron_asr_audio.c nemotron_asr_encoder.c nemotron_asr_decoder.c nemotron_asr_model.c nemotron_asr_kernels.c nemotron_asr_kernels_generic.c nemotron_asr_kernels_neon.c nemotron_asr_kernels_avx.c
 SRCS = main.c $(RUNTIME_SRCS)
 OBJS = $(SRCS:.c=.o)
@@ -16,7 +45,6 @@ RUNTIME_OBJS = $(RUNTIME_SRCS:.c=.o)
 MIC_OBJS = mic.o $(RUNTIME_OBJS)
 KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 KERNEL_BENCH_OBJS = kernel_bench.o nemotron_asr_kernels.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
-UNAME_S := $(shell uname -s)
 
 .PHONY: all clean debug generic blas mic check-kernels bench-kernels check-arch-syntax
 

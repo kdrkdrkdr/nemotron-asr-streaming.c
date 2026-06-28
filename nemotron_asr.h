@@ -95,6 +95,10 @@ typedef struct {
 typedef struct {
     void *map;
     size_t map_size;
+#ifdef _WIN32
+    void *win_file;     /* HANDLE to the open file */
+    void *win_mapping;  /* HANDLE to the file mapping object */
+#endif
     nemo_tensor_t *tensors;
     int n_tensors;
     char **vocab;
@@ -146,6 +150,7 @@ void nemo_free(nemo_ctx_t *ctx);
 int nemo_set_language(nemo_ctx_t *ctx, const char *lang);
 char *nemo_transcribe(nemo_ctx_t *ctx, const char *wav_path);
 char *nemo_transcribe_audio(nemo_ctx_t *ctx, const float *samples, int n_samples);
+char *nemo_transcribe_stdin(nemo_ctx_t *ctx);
 
 float *nemo_encoder_forward(nemo_ctx_t *ctx, const float *mel, int mel_frames, int *out_frames);
 int nemo_encoder_forward_chunks(nemo_ctx_t *ctx, const float *mel, int mel_frames,

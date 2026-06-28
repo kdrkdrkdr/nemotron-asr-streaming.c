@@ -1,13 +1,19 @@
 #include "nemotron_asr.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #define NEMO_MODEL_MAGIC "NM35ASR"
 #define NEMO_MODEL_VERSION 1u
@@ -194,6 +200,37 @@ static int bind_known_tensors(nemo_model_t *m) {
 
 int nemo_model_load(nemo_model_t *model, const char *path) {
     memset(model, 0, sizeof(*model));
+#ifdef _WIN32
+    HANDLE fh = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "nemotron: cannot open %s (error %lu)\n", path, GetLastError());
+        return -1;
+    }
+    LARGE_INTEGER fsz;
+    if (!GetFileSizeEx(fh, &fsz) || fsz.QuadPart <= 0) {
+        fprintf(stderr, "nemotron: cannot stat %s\n", path);
+        CloseHandle(fh);
+        return -1;
+    }
+    HANDLE mh = CreateFileMappingA(fh, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mh) {
+        fprintf(stderr, "nemotron: file mapping failed for %s (error %lu)\n", path, GetLastError());
+        CloseHandle(fh);
+        return -1;
+    }
+    void *map = MapViewOfFile(mh, FILE_MAP_READ, 0, 0, 0);
+    if (!map) {
+        fprintf(stderr, "nemotron: map view failed for %s (error %lu)\n", path, GetLastError());
+        CloseHandle(mh);
+        CloseHandle(fh);
+        return -1;
+    }
+    model->win_file = (void *)fh;
+    model->win_mapping = (void *)mh;
+    model->map = map;
+    model->map_size = (size_t)fsz.QuadPart;
+#else
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         fprintf(stderr, "nemotron: cannot open %s: %s\n", path, strerror(errno));
@@ -213,6 +250,7 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
     }
     model->map = map;
     model->map_size = (size_t)st.st_size;
+#endif
 
     const unsigned char *base = (const unsigned char *)map;
     const unsigned char *p = base;
@@ -335,6 +373,12 @@ void nemo_model_free(nemo_model_t *model) {
         for (int i = 0; i < model->n_tensors; i++) free((void *)model->tensors[i].name);
         free(model->tensors);
     }
+#ifdef _WIN32
+    if (model->map) UnmapViewOfFile(model->map);
+    if (model->win_mapping) CloseHandle((HANDLE)model->win_mapping);
+    if (model->win_file) CloseHandle((HANDLE)model->win_file);
+#else
     if (model->map && model->map != MAP_FAILED) munmap(model->map, model->map_size);
+#endif
     memset(model, 0, sizeof(*model));
 }

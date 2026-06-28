@@ -5,7 +5,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <sys/time.h>
+#endif
 
 static uint32_t rng_state = 0x2468ace1u;
 static volatile float sink_f32;
@@ -35,9 +41,16 @@ static uint16_t f32_to_bf16(float v) {
 }
 
 static double now_ms(void) {
+#ifdef _WIN32
+    LARGE_INTEGER freq, ctr;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&ctr);
+    return (double)ctr.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (double)tv.tv_sec * 1000.0 + (double)tv.tv_usec / 1000.0;
+#endif
 }
 
 static float checksum(const float *x, int n) {

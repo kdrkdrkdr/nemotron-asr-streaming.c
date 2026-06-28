@@ -1,5 +1,6 @@
 *.o
 *.o.tmp
+*.exe
 nemotron_asr
 nemotron_asr_mic
 nemotron_kernel_check
