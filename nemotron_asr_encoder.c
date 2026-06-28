@@ -396,10 +396,12 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
         }
     }
     nemo_linear_nobias_weight(out, ctxv, &l->att_out_w, t, NEMO_D_MODEL, NEMO_D_MODEL);
+    /* K and V caches always hold the same frames; they advance together from
+     * the same length, so a single length is written back. */
     int next_len = s->att_len[layer];
-    int next_v_len = s->att_len[layer];
+    int v_len = next_len;
     cache_append(s->att_k[layer], &next_len, s->att_cap, k_cur, t, NEMO_D_MODEL);
-    cache_append(s->att_v[layer], &next_v_len, s->att_cap, v_cur, t, NEMO_D_MODEL);
+    cache_append(s->att_v[layer], &v_len, s->att_cap, v_cur, t, NEMO_D_MODEL);
     s->att_len[layer] = next_len;
     return 0;
 }

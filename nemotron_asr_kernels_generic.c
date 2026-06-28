@@ -24,6 +24,7 @@ float nemo_dot_f32_generic(const float *a, const float *b, int n) {
     return dot_f32_generic_inline(a, b, n);
 }
 
+/* Q8P packed layout: see nemo_q8p_row_block in nemotron_asr_kernels.c. */
 static inline const int8_t *q8p_row_block_generic(const int8_t *w, int row,
                                                   int stride, int k) {
     const int tile = row >> 2;

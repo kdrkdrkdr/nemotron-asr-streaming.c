@@ -80,6 +80,7 @@ float nemo_dot_f32_avx(const float *a, const float *b, int n) {
     return dot_f32_avx_inline(a, b, n);
 }
 
+/* Q8P packed layout: see nemo_q8p_row_block in nemotron_asr_kernels.c. */
 static inline int32_t dot_i8p_avx_inline(const int8_t *x, const int8_t *w,
                                          int row, int stride) {
     const int tile = row >> 2;
