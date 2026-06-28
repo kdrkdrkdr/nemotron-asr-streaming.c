@@ -30,55 +30,16 @@ LDFLAGS ?= -lm -lpthread -flto
 EXE :=
 endif
 
-SYNTAX_ARM_TARGET ?= arm64-apple-macos13
-SYNTAX_X86_TARGET ?= x86_64-apple-macos13
-SYNTAX_CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -ffast-math -fsyntax-only
-
 TARGET = nemotron_asr$(EXE)
-MIC_TARGET = nemotron_asr_mic$(EXE)
-KERNEL_CHECK_TARGET = nemotron_kernel_check$(EXE)
-KERNEL_BENCH_TARGET = nemotron_kernel_bench$(EXE)
-RUNTIME_SRCS = nemotron_asr.c nemotron_asr_audio.c nemotron_asr_encoder.c nemotron_asr_decoder.c nemotron_asr_model.c nemotron_asr_kernels.c nemotron_asr_kernels_generic.c nemotron_asr_kernels_neon.c nemotron_asr_kernels_avx.c
-SRCS = main.c $(RUNTIME_SRCS)
+SRCS = main.c nemotron_asr.c nemotron_asr_audio.c nemotron_asr_encoder.c nemotron_asr_decoder.c nemotron_asr_model.c nemotron_asr_kernels.c nemotron_asr_kernels_generic.c nemotron_asr_kernels_neon.c nemotron_asr_kernels_avx.c
 OBJS = $(SRCS:.c=.o)
-RUNTIME_OBJS = $(RUNTIME_SRCS:.c=.o)
-MIC_OBJS = mic.o $(RUNTIME_OBJS)
-KERNEL_CHECK_OBJS = kernel_check.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
-KERNEL_BENCH_OBJS = kernel_bench.o nemotron_asr_kernels.o nemotron_asr_kernels_generic.o nemotron_asr_kernels_neon.o nemotron_asr_kernels_avx.o
 
-.PHONY: all clean debug generic mic check-kernels bench-kernels check-arch-syntax
+.PHONY: all clean debug generic
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)
-
-$(KERNEL_CHECK_TARGET): $(KERNEL_CHECK_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(KERNEL_CHECK_OBJS) $(LDFLAGS)
-
-$(KERNEL_BENCH_TARGET): $(KERNEL_BENCH_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(KERNEL_BENCH_OBJS) $(LDFLAGS)
-
-check-kernels: $(KERNEL_CHECK_TARGET)
-	./$(KERNEL_CHECK_TARGET)
-
-bench-kernels: $(KERNEL_BENCH_TARGET)
-	./$(KERNEL_BENCH_TARGET)
-
-check-arch-syntax:
-	$(CC) -target $(SYNTAX_ARM_TARGET) $(SYNTAX_CFLAGS) nemotron_asr_kernels_neon.c
-	$(CC) -target $(SYNTAX_X86_TARGET) $(SYNTAX_CFLAGS) -mavx2 -mfma nemotron_asr_kernels_avx.c
-
-ifeq ($(UNAME_S),Darwin)
-mic: $(MIC_TARGET)
-
-$(MIC_TARGET): $(MIC_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(MIC_OBJS) $(LDFLAGS) -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
-else
-mic:
-	@echo "nemotron_asr_mic is currently macOS-only."
-	@false
-endif
 
 %.o: %.c nemotron_asr.h nemotron_asr_kernels.h nemotron_asr_kernels_impl.h
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -92,4 +53,4 @@ generic: LDFLAGS = -lm -lpthread
 generic: clean $(TARGET)
 
 clean:
-	rm -f $(OBJS) kernel_check.o kernel_bench.o mic.o $(KERNEL_BENCH_TARGET) $(KERNEL_CHECK_TARGET) $(MIC_TARGET) $(TARGET)
+	rm -f $(OBJS) $(TARGET)

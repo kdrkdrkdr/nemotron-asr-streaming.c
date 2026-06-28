@@ -15,7 +15,7 @@ Weights are **W8A8** (packed int8, "Q8P").
 ```bash
 make                                    # build
 
-# download the pre-converted W8A8 model (~0.64 GiB)
+# download the pre-converted W8A8 model (~0.62 GiB)
 huggingface-cli download kdrkdrkdr/nemotron-3.5-asr-streaming-0.6b-w8a8 \
   nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --local-dir .
 
@@ -55,14 +55,6 @@ Replace the `ffmpeg` input for your OS:
 > **Windows:** run the pipe under `cmd.exe` (or `cmd /c "…"`), **not** Windows
 > PowerShell 5.1 — its pipeline corrupts the raw byte stream.
 
-macOS also has a native microphone tool with device selection and a level meter:
-
-```bash
-make mic
-./nemotron_asr_mic -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin -l auto --strip-tags
-# --list-devices, --device X, --meter, --trace
-```
-
 ## Latency vs. accuracy (`--att-right`)
 
 The model is cache-aware with a **fixed set of chunk sizes**. `--att-right` picks
@@ -101,22 +93,23 @@ Only these five values are valid — they are the model's trained context famili
 make                 # optimized build (-march=native); auto-dispatches NEON / AVX2
 make generic         # portable scalar fallback
 make debug           # AddressSanitizer build
-make check-kernels   # verify the SIMD kernels against the scalar reference
 make clean
 ```
 
 On Windows (an MSYS2 / MinGW shell), `make` uses `clang` and produces
-`nemotron_asr.exe`. `make mic` is macOS-only. Implementation internals — kernels,
-threading, Q8P packing, streaming caches, and the Win32 platform layer — are
-documented in [`MODEL.md`](MODEL.md).
+`nemotron_asr.exe`. Implementation internals — kernels, threading, Q8P packing,
+streaming caches, and the Win32 platform layer — are documented in
+[`MODEL.md`](MODEL.md).
 
 ## Convert it yourself (optional)
 
 Most users just download the pre-built `.bin` (see [Quick start](#quick-start)).
-Building it from the original `.nemo` needs Python (`torch`, `numpy`, `yaml`):
+To rebuild it from the original `.nemo`, grab the converter from the model repo
+([`convert_nemo.py`](https://huggingface.co/kdrkdrkdr/nemotron-3.5-asr-streaming-0.6b-w8a8/blob/main/convert_nemo.py))
+— it needs Python (`torch`, `numpy`, `yaml`):
 
 ```bash
-python3 tools/convert_nemo.py path/to/nemotron-3.5-asr-streaming-0.6b.nemo \
+python3 convert_nemo.py path/to/nemotron-3.5-asr-streaming-0.6b.nemo \
   -o nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --w8a8-linear-weights
 ```
 

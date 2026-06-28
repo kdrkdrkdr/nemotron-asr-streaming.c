@@ -224,8 +224,7 @@ layer replaces the POSIX dependencies — the thread pool uses `SRWLOCK` plus
 condition variables instead of pthreads, the model file is mapped with
 `CreateFileMapping`/`MapViewOfFile` instead of `mmap`, and CPU count and timing
 use Win32 APIs. AVX2+FMA dispatch is unchanged because clang defines
-`__AVX2__`/`__FMA__` under `-march=native` even on the MSVC target. The live
-microphone tool remains macOS-only.
+`__AVX2__`/`__FMA__` under `-march=native` even on the MSVC target.
 
 References used while matching the graph:
 
