@@ -54,32 +54,21 @@ continues in its normal streaming representation.
 
 ## Features
 
-- **Pure C inference**: C11 runtime with libc/libm/pthread only by default.
-- **Memory-mapped model file**: converted weights are mmap'd from a compact
-  tensor stream.
-- **Packed W8A8 linear weights**: primary converter path stores dense linear,
-  LSTM, and vocabulary classifier weights as Q8P packed int8 and dynamically
-  quantizes activations for int8 matvec inference.
-- **Original streaming shape**: chunk size is controlled by Nemotron's
-  cache-aware `att_context_size` right context.
-- **Incremental front end**: audio samples and mel frames are accepted
-  incrementally.
-- **Streaming encoder**: causal subsampling, per-layer attention K/V cache, and
-  causal convolution cache.
-- **Streaming RNN-T decoder**: prediction LSTM state is preserved across
-  encoder chunks.
-- **Language prompt control**: supports prompt IDs such as `auto`, `en-US`, and
-  `ko-KR`.
-- **Native kernels**: generic C fallback plus NEON and AVX2 dispatch for the
-  W8A8 hot path.
-- **Threaded dense path**: qwen-asr-style persistent worker pool for large
-  dense linear, matvec, and classifier operations.
-- **Fused QKV projection**: encoder attention computes Q/K/V in one scheduled
-  projection pass to reduce dispatch overhead on small streaming chunks.
-- **Low-allocation streaming loop**: encoder, prompt, and RNN-T projection
-  scratch buffers are reused across chunks.
-- **Live testing**: macOS microphone CLI with input device selection and a
-  real-time input meter.
+- **Pure C inference**: dependency-free C11 runtime (libc/libm/pthread on POSIX,
+  libc plus the Win32 API on Windows). No CUDA, PyTorch, ONNX, or NeMo.
+- **Memory-mapped model file**: converted weights are mapped from a compact
+  tensor stream (`mmap` on POSIX, `CreateFileMapping` on Windows).
+- **Packed W8A8 weights**: dense linear, LSTM, and classifier weights are stored
+  as Q8P packed int8 with dynamic activation quantization for int8 inference.
+- **Cache-aware streaming**: an incremental log-mel front end feeds a streaming
+  FastConformer encoder and RNN-T decoder; chunk size is set by Nemotron's
+  `att_context_size` right context.
+- **Language prompt control**: prompt IDs such as `auto`, `en-US`, and `ko-KR`.
+- **Native kernels**: generic C plus NEON and AVX2 backends for the W8A8 hot path.
+- **Live testing**: macOS microphone CLI with input device selection and meter.
+
+Implementation internals (kernels, threading, streaming caches, tuning, and the
+Windows platform layer) are documented in `MODEL.md`.
 
 ## Build
 
@@ -102,6 +91,21 @@ clang-oriented cross-syntax check for the architecture-specific kernel files.
 representative dense matvec and classifier argmax shapes such as FFN,
 attention, and joint vocabulary projections. It also reports the packed Q8P
 runtime wrapper path that includes dynamic activation quantization.
+
+### Windows
+
+The runtime builds natively on Windows from an MSYS2 / MinGW shell. `make`
+detects the Windows shell, builds with `clang`, and produces `nemotron_asr.exe`.
+
+```bash
+make                 # builds nemotron_asr.exe with clang
+make check-kernels   # validate native (AVX2) kernels against generic C
+make bench-kernels   # microbenchmark the kernels
+```
+
+The live microphone tool (`make mic`) remains macOS-only. To build with a
+different compiler, override `CC`, for example `make CC=gcc` under MinGW-w64.
+The Win32 platform layer (threads, file mapping) is described in `MODEL.md`.
 
 ## Convert Model
 
@@ -252,31 +256,6 @@ units. If omitted, it defaults to `att_right + 1`.
 The model still emits encoder chunks according to `--att-right`; `--push-frames`
 only controls how frequently microphone samples are handed to the front end.
 
-## How Streaming Works
-
-This runtime follows Nemotron's cache-aware FastConformer-RNN-T design instead
-of using text rollback.
-
-Pipeline:
-
-```text
-audio samples
--> streaming log-mel frames
--> causal subsampling conv stages
--> FastConformer chunks with attention K/V cache and conv cache
--> RNN-T greedy decoder with persistent prediction LSTM state
--> text
-```
-
-Important details:
-
-- Mel frames are emitted as soon as their centered analysis window is available.
-- The subsampling conv stem emits only new pre-encoder frames.
-- Encoder chunks are non-overlapping and have `att_right + 1` frames.
-- Encoder attention reuses cached left context from previous chunks.
-- Conformer convolution modules keep causal GLU history.
-- RNN-T decoding keeps prediction-network hidden and cell state.
-
 ## Language
 
 Default language prompt is `auto`.
@@ -290,52 +269,6 @@ Examples:
 ```
 
 Use `--strip-tags` to remove emitted language tags such as `<en-US>`.
-
-## Kernels
-
-The public kernel surface focuses on the current W8A8 hot path:
-
-- packed Q8P matvec
-- packed Q8P classifier argmax range
-- typed-weight linear wrappers for direct Q8P dispatch
-- fused encoder Q/K/V projection
-- language prompt projection
-- fused RNN-T prediction LSTM gates
-- supporting streaming kernels for attention, residual accumulation,
-  subsampling preconv, and mel front-end work
-
-Backends:
-
-- `nemotron_asr_kernels_generic.c`: scalar C fallback for W8A8 Q8P dense paths.
-- `nemotron_asr_kernels_neon.c`: ARM NEON implementation for base integer SIMD
-  Q8P matvec and classifier argmax.
-- `nemotron_asr_kernels_avx.c`: AVX2 implementation for Q8P matvec and
-  classifier argmax.
-- Q8P paths use baseline NEON and AVX2 integer SIMD only: no dotprod, i8mm,
-  VNNI, or AVX512-VNNI dependency is required.
-
-The normal convolution, layer norm, softmax, activation, and model-binding
-utilities live in the shared runtime code.
-
-Threading:
-
-- `nemo_set_threads()` controls a persistent worker pool, capped at 16 threads.
-- The CLI defaults to all online CPUs and accepts `-t N`.
-- Large dense calls are split across output rows.
-- Small operations stay single-threaded to avoid scheduling overhead.
-- W8A8 linear weights are consumed directly from the mmap'd packed int8 payload
-  and use dynamic per-vector activation quantization.
-- Single-row W8A8 calls share one prequantized activation buffer across output
-  worker threads; multi-row encoder calls keep per-worker stack quantization to
-  avoid an extra synchronization point.
-- Q8P matvec and classifier argmax use four-output-row packed int8 tiles with a
-  16-byte padded stride in the generic, NEON, and AVX2 backends.
-
-Example JFK sample timing on an 8-core Apple Silicon laptop:
-
-| build/options | inference | realtime |
-|---------------|-----------|----------|
-| native W8A8 Q8P linear, `-t 8` | 1.57 s | 7.03x |
 
 ## Smoke Checks
 
@@ -364,18 +297,9 @@ make generic
 
 ## Model Facts
 
-- Audio: 16 kHz mono.
-- Features: 128 log-mel bins, `n_fft=512`, `win=400`, `hop=160`.
-- Encoder: 24-layer cache-aware FastConformer.
-- Encoder width: `d_model=1024`.
-- Attention: 8 heads, 128 dimensions per head.
-- Subsampling: causal `dw_striding`, factor 8.
-- Pre-encoder flatten size: `256 * 17`.
-- Prompt: language one-hot of size 128, projected into encoder output.
-- Decoder: RNN-T greedy decoding with 2-layer LSTM prediction network.
-- Joint: encoder projection, prediction projection, ReLU, vocabulary classifier.
-
-See `MODEL.md` for the tensor mapping and kernel-priority analysis.
+Audio in is 16 kHz mono (other sample rates are resampled). For the full
+architecture, tensor mapping, kernel-priority analysis, streaming pipeline, and
+W8A8 tuning notes, see `MODEL.md`.
 
 ## API Sketch
 

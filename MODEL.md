@@ -172,6 +172,61 @@ the graph.
 Qwen-only kernels that are not used by the Nemotron graph should not be carried
 over just for symmetry.
 
+## C Runtime Streaming Pipeline
+
+The runtime follows Nemotron's cache-aware FastConformer-RNN-T design instead of
+text rollback:
+
+```text
+audio samples
+-> streaming log-mel frames
+-> causal subsampling conv stages
+-> FastConformer chunks with attention K/V cache and conv cache
+-> RNN-T greedy decoder with persistent prediction LSTM state
+-> text
+```
+
+Emission details: mel frames are emitted as soon as their centered analysis
+window is available; the subsampling conv stem emits only new pre-encoder
+frames; encoder chunks are non-overlapping with `att_right + 1` frames and reuse
+cached left context; conformer conv keeps causal GLU history; the RNN-T decoder
+keeps prediction-network hidden and cell state across chunks.
+
+## Public Kernel Surface
+
+The exposed kernels focus on the W8A8 hot path:
+
+- packed Q8P matvec
+- packed Q8P classifier argmax range
+- typed-weight linear wrappers for direct Q8P dispatch
+- fused encoder Q/K/V projection
+- language prompt projection
+- fused RNN-T prediction LSTM gates
+- supporting streaming kernels for attention, residual accumulation,
+  subsampling preconv, and mel front-end work
+
+Convolution, layer norm, softmax, activation, and model-binding utilities live
+in the shared runtime code. Backends: `nemotron_asr_kernels_generic.c` (scalar
+fallback), `nemotron_asr_kernels_neon.c` (baseline NEON), and
+`nemotron_asr_kernels_avx.c` (AVX2) — Q8P paths use baseline integer SIMD only
+(no dotprod/i8mm/VNNI). Threading uses `nemo_set_threads()` (persistent pool,
+capped at 16) with output-row splitting for large dense calls.
+
+Example JFK sample timing on an 8-core Apple Silicon laptop: native W8A8 Q8P
+linear, `-t 8` — 1.57 s inference, 7.03x realtime.
+
+## Windows Platform Layer
+
+The runtime builds natively on Windows from an MSYS2/MinGW shell: the Makefile
+detects the Windows shell and builds with `clang` (MSVC-runtime target by
+default) under `-march=native`, producing `nemotron_asr.exe`. A small Win32
+layer replaces the POSIX dependencies — the thread pool uses `SRWLOCK` plus
+condition variables instead of pthreads, the model file is mapped with
+`CreateFileMapping`/`MapViewOfFile` instead of `mmap`, and CPU count and timing
+use Win32 APIs. AVX2+FMA dispatch is unchanged because clang defines
+`__AVX2__`/`__FMA__` under `-march=native` even on the MSVC target. The live
+microphone tool remains macOS-only.
+
 References used while matching the graph:
 
 - NVIDIA NeMo `ConformerEncoder` source: https://docs.nvidia.com/nemo/speech/nightly/_modules/nemo/collections/asr/modules/conformer_encoder.html
