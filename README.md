@@ -27,30 +27,31 @@ PyTorch, ONNX Runtime, or NeMo dependency in the inference path.
 
 ## Quick Start
 
-```bash
-# Convert the original NeMo archive once.
-python3 tools/convert_nemo.py \
-  ../nemotron-3.5-asr-streaming-0.6b/nemotron-3.5-asr-streaming-0.6b.nemo \
-  -o nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
-  --w8a8-linear-weights
+No Python required — build the C runtime, download the pre-converted W8A8
+model from Hugging Face, and transcribe:
 
-# Build the normal WAV CLI.
+```bash
+# Build the WAV CLI (C toolchain only).
 make
+
+# Download the pre-converted W8A8 model (~0.64 GiB).
+huggingface-cli download kdrkdrkdr/nemotron-3.5-asr-streaming-0.6b-w8a8 \
+  nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin --local-dir .
 
 # Transcribe a WAV file.
 ./nemotron_asr \
   -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
-  -i ../qwen-asr/samples/jfk.wav \
+  -i audio.wav \
   -l en-US \
   --strip-tags
 ```
 
-Conversion requires Python with `torch`, `numpy`, and `yaml`. Inference does not.
-
-For this branch, use the W8A8 linear file. Dense linear, LSTM, and classifier
-weights are stored as packed Q8P int8 with 32-bit row scales. Runtime
-activation vectors are quantized at the typed dense call sites, then the graph
-continues in its normal streaming representation.
+The model is [`nvidia/nemotron-3.5-asr-streaming-0.6b`](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b)
+converted to packed W8A8 Q8P int8: dense linear, LSTM, and classifier weights
+are per-row int8 with 32-bit row scales; activations are quantized at the typed
+dense call sites at inference time. To build the `.bin` yourself instead of
+downloading it, see [Convert Model](#convert-model) — that path needs Python
+(`torch`, `numpy`, `yaml`); **inference never does**.
 
 ## Features
 
@@ -108,6 +109,12 @@ different compiler, override `CC`, for example `make CC=gcc` under MinGW-w64.
 The Win32 platform layer (threads, file mapping) is described in `MODEL.md`.
 
 ## Convert Model
+
+Most users should just download the pre-converted `.bin` (see
+[Quick Start](#quick-start)) — no Python needed. This section is for building
+the `.bin` yourself from the original `.nemo` (e.g. to reproduce it or convert a
+different checkpoint). It is the only step that requires Python (`torch`,
+`numpy`, `yaml`); **inference never does**.
 
 The C runtime does not load `.nemo` directly. Convert once into the W8A8 model
 file used by this branch:
