@@ -8,14 +8,12 @@ chunks, the FastConformer encoder keeps attention/convolution caches, and the
 RNN-T decoder keeps its state across chunks — so it transcribes a live stream or
 a file incrementally, in real time.
 
-Weights are **W8A8** (packed int8, "Q8P"). Inference needs only a C toolchain —
-no Python, PyTorch, NeMo, ONNX, or BLAS. (GPU is out of scope; this is a CPU
-real-time streaming runtime.)
+Weights are **W8A8** (packed int8, "Q8P").
 
-## Quick start (no Python)
+## Quick start
 
 ```bash
-make                                    # build (C toolchain only)
+make                                    # build
 
 # download the pre-converted W8A8 model (~0.64 GiB)
 huggingface-cli download kdrkdrkdr/nemotron-3.5-asr-streaming-0.6b-w8a8 \
@@ -37,8 +35,12 @@ text as you speak. Capture the mic with `ffmpeg` and pipe it in:
 ```bash
 ffmpeg -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - \
   | ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
-      --stdin -l auto --strip-tags
+      --stdin -l auto --strip-tags --att-right 1
 ```
+
+`--att-right` sets the live latency — lower is snappier, higher waits for more
+look-ahead context (`1` = 160 ms, default `3` = 320 ms). See the latency table
+below.
 
 Replace the `ffmpeg` input for your OS:
 
@@ -110,9 +112,8 @@ documented in [`MODEL.md`](MODEL.md).
 
 ## Convert it yourself (optional)
 
-Most users just download the pre-built `.bin` (see [Quick start](#quick-start-no-python)).
-To build it from the original `.nemo` instead — the only step that needs Python
-(`torch`, `numpy`, `yaml`):
+Most users just download the pre-built `.bin` (see [Quick start](#quick-start)).
+Building it from the original `.nemo` needs Python (`torch`, `numpy`, `yaml`):
 
 ```bash
 python3 tools/convert_nemo.py path/to/nemotron-3.5-asr-streaming-0.6b.nemo \
