@@ -29,7 +29,6 @@ typedef struct {
     float *att_k_cur;
     float *att_v_cur;
     float *att_ctx;
-    float *att_scores;
     float *conv_pw;
     float *conv_glu_tmp;
     float *conv_dw;
@@ -80,7 +79,6 @@ static void enc_stream_free(enc_stream_state_t *s) {
     free(s->att_k_cur);
     free(s->att_v_cur);
     free(s->att_ctx);
-    free(s->att_scores);
     free(s->conv_pw);
     free(s->conv_glu_tmp);
     free(s->conv_dw);
@@ -116,14 +114,13 @@ static int enc_stream_init_scratch(enc_stream_state_t *s, int chunk) {
     s->att_k_cur = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->att_v_cur = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->att_ctx = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
-    s->att_scores = nemo_alloc((size_t)s->scratch_scores, sizeof(float));
     s->conv_pw = nemo_alloc((size_t)chunk * 2 * NEMO_D_MODEL, sizeof(float));
     s->conv_glu_tmp = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->conv_dw = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->conv_norm = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     s->chunk_buf = nemo_alloc((size_t)chunk * NEMO_D_MODEL, sizeof(float));
     if (!s->layer_norm || !s->layer_ff || !s->layer_tmp ||
-        !s->att_q || !s->att_k_cur || !s->att_v_cur || !s->att_ctx || !s->att_scores ||
+        !s->att_q || !s->att_k_cur || !s->att_v_cur || !s->att_ctx ||
         !s->conv_pw || !s->conv_glu_tmp || !s->conv_dw || !s->conv_norm ||
         !s->chunk_buf) {
         return -1;
@@ -337,43 +334,56 @@ static int rel_attention_stream(const nemo_ctx_t *ctx, const nemo_enc_layer_t *l
     float *k_cur = s->att_k_cur;
     float *v_cur = s->att_v_cur;
     float *ctxv = s->att_ctx;
-    float *scores = s->att_scores;
     const float *p = s->rel_pos[layer];
-    if (!q || !k_cur || !v_cur || !ctxv || !scores || !p) return -1;
+    if (!q || !k_cur || !v_cur || !ctxv || !p) return -1;
     nemo_linear3_nobias_weight(q, k_cur, v_cur, x,
                                &l->att_q_w, &l->att_k_w, &l->att_v_w,
                                t, NEMO_D_MODEL, NEMO_D_MODEL);
 
     const float scale = 1.0f / sqrtf((float)NEMO_HEAD_DIM);
+    const float neg_inf = -3.4028234663852886e38f;
     for (int qi = 0; qi < t; qi++) {
         for (int h = 0; h < NEMO_ENC_HEADS; h++) {
             const float *qh = q + (size_t)qi * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
             const float *bu = l->pos_bias_u + h * NEMO_HEAD_DIM;
             const float *bv = l->pos_bias_v + h * NEMO_HEAD_DIM;
+            float *dst = ctxv + (size_t)qi * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
+            memset(dst, 0, sizeof(float) * NEMO_HEAD_DIM);
+            /* Online softmax: one pass over keys, no score row, no second
+             * normalization pass. Maintain running max and running sum and
+             * rescale the accumulated context whenever the max grows. */
+            float run_max = neg_inf;
+            float run_sum = 0.0f;
             for (int kj = 0; kj < total_k; kj++) {
                 int key_local = kj - cache_len;
                 int rel_pos = qi - key_local;
-                const float *kh;
+                const float *kh, *vh;
                 if (kj < cache_len) {
                     kh = s->att_k[layer] + (size_t)kj * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
-                } else {
-                    kh = k_cur + (size_t)(kj - cache_len) * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
-                }
-                const float *ph = p + (size_t)(rel_pos - s->pos_min) * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
-                scores[kj] = nemo_attention_score_f32(qh, bu, kh, bv, ph, NEMO_HEAD_DIM) * scale;
-            }
-            nemo_softmax(scores, total_k);
-            float *dst = ctxv + (size_t)qi * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
-            memset(dst, 0, sizeof(float) * NEMO_HEAD_DIM);
-            for (int kj = 0; kj < total_k; kj++) {
-                const float *vh;
-                if (kj < cache_len) {
                     vh = s->att_v[layer] + (size_t)kj * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
                 } else {
+                    kh = k_cur + (size_t)(kj - cache_len) * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
                     vh = v_cur + (size_t)(kj - cache_len) * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
                 }
-                nemo_vec_axpy_inplace(dst, vh, scores[kj], NEMO_HEAD_DIM);
+                const float *ph = p + (size_t)(rel_pos - s->pos_min) * NEMO_D_MODEL + h * NEMO_HEAD_DIM;
+                float sij = nemo_attention_score_f32(qh, bu, kh, bv, ph, NEMO_HEAD_DIM) * scale;
+                if (sij > run_max) {
+                    float corr = (run_max == neg_inf) ? 0.0f : expf(run_max - sij);
+                    if (corr != 1.0f) {
+                        for (int d = 0; d < NEMO_HEAD_DIM; d++) dst[d] *= corr;
+                        run_sum *= corr;
+                    }
+                    run_max = sij;
+                    run_sum += 1.0f;
+                    nemo_vec_axpy_inplace(dst, vh, 1.0f, NEMO_HEAD_DIM);
+                } else {
+                    float w = expf(sij - run_max);
+                    run_sum += w;
+                    nemo_vec_axpy_inplace(dst, vh, w, NEMO_HEAD_DIM);
+                }
             }
+            float inv = run_sum > 0.0f ? 1.0f / run_sum : 0.0f;
+            for (int d = 0; d < NEMO_HEAD_DIM; d++) dst[d] *= inv;
         }
     }
     nemo_linear_nobias_weight(out, ctxv, &l->att_out_w, t, NEMO_D_MODEL, NEMO_D_MODEL);

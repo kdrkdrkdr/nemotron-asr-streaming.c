@@ -26,6 +26,18 @@ static uint32_t le32(const unsigned char *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Modified Bessel function I0, for the Kaiser resampling window. */
+static double nemo_bessel_i0(double x) {
+    double sum = 1.0, term = 1.0;
+    for (int k = 1; k < 32; k++) {
+        double t = x / (2.0 * (double)k);
+        term *= t * t;
+        sum += term;
+        if (term < 1e-12 * sum) break;
+    }
+    return sum;
+}
+
 float *nemo_load_wav(const char *path, int *out_n_samples) {
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -100,15 +112,40 @@ float *nemo_load_wav(const char *path, int *out_n_samples) {
     }
 
     int out_frames = (int)llround((double)in_frames * (double)NEMO_SAMPLE_RATE / (double)sample_rate);
+    if (out_frames < 1) out_frames = 1;
     float *out = nemo_alloc((size_t)out_frames, sizeof(float));
     if (!out) { free(mono); return NULL; }
+    /*
+     * Windowed-sinc (Kaiser) resampling. The sinc cutoff is lowered to the
+     * destination Nyquist when downsampling, which anti-aliases (linear
+     * interpolation does not). Each output sample is normalized by the sum of
+     * its tap weights, which also corrects for taps truncated at the edges.
+     */
+    const int half = 16; /* 32-tap filter */
+    const double beta = 6.0;
+    const double ratio = (double)NEMO_SAMPLE_RATE / (double)sample_rate;
+    const double cutoff = ratio < 1.0 ? ratio : 1.0;
+    const double inv_i0 = 1.0 / nemo_bessel_i0(beta);
     for (int i = 0; i < out_frames; i++) {
-        double src = (double)i * (double)sample_rate / (double)NEMO_SAMPLE_RATE;
-        int j = (int)floor(src);
-        double a = src - (double)j;
-        float s0 = (j >= 0 && j < in_frames) ? mono[j] : 0.0f;
-        float s1 = (j + 1 >= 0 && j + 1 < in_frames) ? mono[j + 1] : s0;
-        out[i] = (float)((1.0 - a) * s0 + a * s1);
+        double center = (double)i / ratio; /* output i maps to this input position */
+        int c = (int)floor(center);
+        double frac = center - (double)c;
+        double acc = 0.0, wsum = 0.0;
+        for (int k = -half + 1; k <= half; k++) {
+            int idx = c + k;
+            if (idx < 0 || idx >= in_frames) continue;
+            double x = (double)k - frac; /* distance in input samples from output point */
+            double sx = M_PI * cutoff * x;
+            double sinc = (x == 0.0) ? 1.0 : sin(sx) / sx;
+            double wn = x / (double)half; /* Kaiser window argument in (-1, 1) */
+            double win = (wn > -1.0 && wn < 1.0)
+                             ? nemo_bessel_i0(beta * sqrt(1.0 - wn * wn)) * inv_i0
+                             : 0.0;
+            double w = sinc * win;
+            acc += w * (double)mono[idx];
+            wsum += w;
+        }
+        out[i] = (float)(wsum != 0.0 ? acc / wsum : 0.0);
     }
     free(mono);
     *out_n_samples = out_frames;
