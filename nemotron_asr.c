@@ -1,8 +1,13 @@
 #include "nemotron_asr.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 typedef struct {
     const char *name;
@@ -129,6 +134,75 @@ char *nemo_transcribe_audio(nemo_ctx_t *ctx, const float *samples, int n_samples
     if (rc != 0) { nemo_rnnt_stream_free(rnnt); return NULL; }
     char *text = nemo_rnnt_stream_finish(rnnt);
     return text;
+}
+
+/*
+ * Live streaming from stdin: raw little-endian s16, 16 kHz, mono. Feeds the
+ * same cache-aware streaming graph as nemo_transcribe_audio, but reads
+ * incrementally and writes recognized text deltas to stdout as they are
+ * emitted. Returns the full final text (caller frees).
+ */
+char *nemo_transcribe_stdin(nemo_ctx_t *ctx) {
+    if (!ctx) return NULL;
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY); /* stop CRLF translation mangling s16le */
+#endif
+    ctx->perf_audio_ms = 0.0;
+    ctx->perf_tokens = 0;
+    ctx->perf_frames = 0;
+    ctx->perf_mel_ms = 0.0;
+    ctx->perf_encoder_ms = 0.0;
+    ctx->perf_decoder_ms = 0.0;
+
+    nemo_rnnt_stream_t *rnnt = nemo_rnnt_stream_create(ctx);
+    nemo_encoder_stream_t *enc = nemo_encoder_stream_create(ctx);
+    nemo_mel_stream_t *mel_stream = nemo_mel_stream_create(ctx);
+    int sample_step = NEMO_HOP_LENGTH * NEMO_SUBSAMPLING_FACTOR * (ctx->att_right + 1);
+    if (sample_step < NEMO_HOP_LENGTH) sample_step = NEMO_HOP_LENGTH;
+    int16_t *pcm = (int16_t *)malloc((size_t)sample_step * sizeof(int16_t));
+    float *fbuf = (float *)malloc((size_t)sample_step * sizeof(float));
+    if (!rnnt || !enc || !mel_stream || !pcm || !fbuf) {
+        nemo_rnnt_stream_free(rnnt);
+        nemo_encoder_stream_free(enc);
+        nemo_mel_stream_free(mel_stream);
+        free(pcm);
+        free(fbuf);
+        return NULL;
+    }
+
+    transcribe_stream_cb_t cb = {ctx, rnnt, enc};
+    size_t printed = 0;
+    long long total_samples = 0;
+    int rc = 0;
+    int read_err = 0;
+    for (;;) {
+        size_t got = fread(pcm, sizeof(int16_t), (size_t)sample_step, stdin);
+        read_err = ferror(stdin);
+        int final = feof(stdin) || read_err;
+        for (size_t i = 0; i < got; i++) fbuf[i] = (float)pcm[i] / 32768.0f;
+        total_samples += (long long)got;
+        rc = nemo_mel_stream_accept(mel_stream, fbuf, (int)got, final, transcribe_mel_chunk, &cb);
+        size_t len = nemo_rnnt_stream_text_len(rnnt);
+        if (len > printed) {
+            const char *t = nemo_rnnt_stream_text(rnnt);
+            fwrite(t + printed, 1, len - printed, stdout);
+            fflush(stdout);
+            printed = len;
+        }
+        if (rc != 0 || final) break;
+    }
+    if (read_err) fprintf(stderr, "nemotron: stdin read error\n");
+
+    ctx->perf_audio_ms = 1000.0 * (double)total_samples / (double)NEMO_SAMPLE_RATE;
+    nemo_mel_stream_free(mel_stream);
+    nemo_encoder_stream_free(enc);
+    free(pcm);
+    free(fbuf);
+    if (rc != 0 || read_err) {
+        nemo_rnnt_stream_free(rnnt);
+        return NULL;
+    }
+    return nemo_rnnt_stream_finish(rnnt);
 }
 
 char *nemo_transcribe(nemo_ctx_t *ctx, const char *wav_path) {

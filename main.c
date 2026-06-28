@@ -10,6 +10,7 @@ static void usage(const char *argv0) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -m <file>       Converted Nemotron model bin\n");
     fprintf(stderr, "  -i <file>       Input WAV (PCM s16; resampled to 16 kHz if needed)\n");
+    fprintf(stderr, "  --stdin         Stream raw s16le 16 kHz mono audio from stdin (live input)\n");
     fprintf(stderr, "  -t <n>          Number of worker threads (default: all CPUs, max 16)\n");
     fprintf(stderr, "  -l <lang>       Language prompt, e.g. en-US, ko-KR, auto (default auto)\n");
     fprintf(stderr, "  --att-right N   Right context in 80 ms encoder frames: 0,1,3,6,13 (default 3)\n");
@@ -27,6 +28,7 @@ int main(int argc, char **argv) {
     int att_right = 3;
     int max_symbols = 10;
     int n_threads = 0;
+    int use_stdin = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -43,6 +45,8 @@ int main(int argc, char **argv) {
             max_symbols = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--strip-tags") == 0) {
             strip_tags = 1;
+        } else if (strcmp(argv[i], "--stdin") == 0) {
+            use_stdin = 1;
         } else if (strcmp(argv[i], "--model-info") == 0) {
             model_info = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -54,8 +58,12 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!model || (!input && !model_info)) {
+    if (!model || (!input && !model_info && !use_stdin)) {
         usage(argv[0]);
+        return 1;
+    }
+    if (input && use_stdin) {
+        fprintf(stderr, "nemotron: use either -i <file> or --stdin, not both\n");
         return 1;
     }
     if (n_threads < 0) {
@@ -115,13 +123,18 @@ int main(int argc, char **argv) {
     }
 
     double t0 = nemo_time_ms();
-    char *text = nemo_transcribe(ctx, input);
+    char *text = use_stdin ? nemo_transcribe_stdin(ctx) : nemo_transcribe(ctx, input);
     double total = nemo_time_ms() - t0;
     if (!text) {
         nemo_free(ctx);
         return 1;
     }
-    printf("%s\n", text);
+    if (use_stdin) {
+        /* deltas were already streamed to stdout; just end the line */
+        printf("\n");
+    } else {
+        printf("%s\n", text);
+    }
     fprintf(stderr,
             "Inference: %.0f ms, frames=%d, tokens=%d (mel %.0f ms, encoder %.0f ms, decoder %.0f ms)\n",
             total, ctx->perf_frames, ctx->perf_tokens,
