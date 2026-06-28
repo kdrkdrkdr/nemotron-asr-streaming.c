@@ -198,13 +198,3 @@ char *nemo_rnnt_stream_finish(nemo_rnnt_stream_t *s) {
     if (!text) text = (char *)calloc(1, 1);
     return text;
 }
-
-char *nemo_rnnt_greedy_decode(nemo_ctx_t *ctx, const float *enc, int enc_frames) {
-    nemo_rnnt_stream_t *stream = nemo_rnnt_stream_create(ctx);
-    if (!stream) return NULL;
-    if (nemo_rnnt_stream_accept(ctx, stream, enc, enc_frames) != 0) {
-        nemo_rnnt_stream_free(stream);
-        return NULL;
-    }
-    return nemo_rnnt_stream_finish(stream);
-}

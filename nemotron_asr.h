@@ -134,7 +134,6 @@ typedef int (*nemo_encoder_chunk_cb)(void *user, const float *enc, int enc_frame
 typedef int (*nemo_mel_chunk_cb)(void *user, const float *mel, int mel_frames, int final);
 
 float *nemo_load_wav(const char *path, int *out_n_samples);
-float *nemo_mel_spectrogram(const nemo_ctx_t *ctx, const float *samples, int n_samples, int *out_frames);
 nemo_mel_stream_t *nemo_mel_stream_create(const nemo_ctx_t *ctx);
 int nemo_mel_stream_accept(nemo_mel_stream_t *stream, const float *samples, int n_samples,
                            int final, nemo_mel_chunk_cb cb, void *user);
@@ -151,15 +150,11 @@ char *nemo_transcribe(nemo_ctx_t *ctx, const char *wav_path);
 char *nemo_transcribe_audio(nemo_ctx_t *ctx, const float *samples, int n_samples);
 char *nemo_transcribe_stdin(nemo_ctx_t *ctx);
 
-float *nemo_encoder_forward(nemo_ctx_t *ctx, const float *mel, int mel_frames, int *out_frames);
-int nemo_encoder_forward_chunks(nemo_ctx_t *ctx, const float *mel, int mel_frames,
-                                nemo_encoder_chunk_cb cb, void *user);
 nemo_encoder_stream_t *nemo_encoder_stream_create(nemo_ctx_t *ctx);
 int nemo_encoder_stream_accept(nemo_ctx_t *ctx, nemo_encoder_stream_t *stream,
                                const float *mel, int mel_frames, int final,
                                nemo_encoder_chunk_cb cb, void *user);
 void nemo_encoder_stream_free(nemo_encoder_stream_t *stream);
-char *nemo_rnnt_greedy_decode(nemo_ctx_t *ctx, const float *enc, int enc_frames);
 nemo_rnnt_stream_t *nemo_rnnt_stream_create(nemo_ctx_t *ctx);
 int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *stream,
                             const float *enc, int enc_frames);

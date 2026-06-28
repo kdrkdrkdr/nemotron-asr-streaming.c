@@ -239,33 +239,3 @@ void nemo_mel_stream_free(nemo_mel_stream_t *s) {
     free(s->samples);
     free(s);
 }
-
-float *nemo_mel_spectrogram(const nemo_ctx_t *ctx, const float *samples, int n_samples, int *out_frames) {
-    const nemo_encoder_t *e = &ctx->model.encoder;
-    int frames = n_samples / NEMO_HOP_LENGTH + 1;
-    if (frames < 1) frames = 1;
-    float *mel = nemo_alloc((size_t)frames * NEMO_MEL_BINS, sizeof(float));
-    if (!mel) return NULL;
-
-    float power[NEMO_N_FFT / 2 + 1];
-    float frame[NEMO_N_FFT];
-
-    for (int t = 0; t < frames; t++) {
-        int start = t * NEMO_HOP_LENGTH - NEMO_N_FFT / 2;
-        memset(frame, 0, sizeof(frame));
-        int win_offset = (NEMO_N_FFT - NEMO_WIN_LENGTH) / 2;
-        for (int i = 0; i < NEMO_WIN_LENGTH; i++) {
-            int src = start + win_offset + i;
-            float s = (src >= 0 && src < n_samples) ? samples[src] : 0.0f;
-            frame[win_offset + i] = s * e->window[i];
-        }
-        nemo_fft512_power_f32(power, frame);
-        for (int m = 0; m < NEMO_MEL_BINS; m++) {
-            const float *fb = e->mel_fb + (size_t)m * (NEMO_N_FFT / 2 + 1);
-            float v = nemo_dot_f32(fb, power, NEMO_N_FFT / 2 + 1);
-            mel[(size_t)m * frames + t] = logf((float)v + 5.960464477539063e-08f);
-        }
-    }
-    *out_frames = frames;
-    return mel;
-}

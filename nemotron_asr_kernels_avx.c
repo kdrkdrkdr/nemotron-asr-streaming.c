@@ -1,9 +1,8 @@
 /*
- * nemotron_asr_kernels_avx.c - x86 AVX2/AVX-512 hot kernels.
+ * nemotron_asr_kernels_avx.c - x86 AVX2 hot kernels.
  * FMA f32 dot and packed Q8P int8 matvec/argmax (int8->int16 widening +
  * madd_epi16, no VNNI), attention score, and AXPY. Compiled only under
- * __AVX2__ && __FMA__, with AVX-512 paths where available; FFT falls back to
- * the generic backend.
+ * __AVX2__ && __FMA__; FFT falls back to the generic backend.
  */
 #include "nemotron_asr_kernels_impl.h"
 
@@ -35,26 +34,6 @@ static inline int32_t hsum_m256i_epi32(__m256i v) {
 }
 
 static inline float dot_f32_avx_inline(const float *a, const float *b, int n) {
-#if defined(__AVX512F__)
-    int i = 0;
-    __m512 acc0 = _mm512_setzero_ps();
-    __m512 acc1 = _mm512_setzero_ps();
-    __m512 acc2 = _mm512_setzero_ps();
-    __m512 acc3 = _mm512_setzero_ps();
-    for (; i + 64 <= n; i += 64) {
-        acc0 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i), acc0);
-        acc1 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i + 16), _mm512_loadu_ps(b + i + 16), acc1);
-        acc2 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i + 32), _mm512_loadu_ps(b + i + 32), acc2);
-        acc3 = _mm512_fmadd_ps(_mm512_loadu_ps(a + i + 48), _mm512_loadu_ps(b + i + 48), acc3);
-    }
-    __m512 acc = _mm512_add_ps(_mm512_add_ps(acc0, acc1), _mm512_add_ps(acc2, acc3));
-    for (; i + 16 <= n; i += 16) {
-        acc = _mm512_fmadd_ps(_mm512_loadu_ps(a + i), _mm512_loadu_ps(b + i), acc);
-    }
-    float sum = _mm512_reduce_add_ps(acc);
-    for (; i < n; i++) sum += a[i] * b[i];
-    return sum;
-#else
     int i = 0;
     __m256 acc0 = _mm256_setzero_ps();
     __m256 acc1 = _mm256_setzero_ps();
@@ -73,7 +52,6 @@ static inline float dot_f32_avx_inline(const float *a, const float *b, int n) {
     float sum = hsum_m256(acc0);
     for (; i < n; i++) sum += a[i] * b[i];
     return sum;
-#endif
 }
 
 float nemo_dot_f32_avx(const float *a, const float *b, int n) {
