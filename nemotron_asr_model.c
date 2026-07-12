@@ -315,7 +315,7 @@ int nemo_model_load(nemo_model_t *model, const char *path) {
             uint64_t packed_rows = align_u64(rows, 4);
             uint64_t data_bytes = packed_rows * stride;
             model->tensors[ti].q8_stride = stride;
-            if (scale_bytes > nbytes || data_bytes > nbytes - scale_bytes) {
+            if (data_bytes > nbytes - scale_bytes) { /* scale_bytes <= nbytes (checked above) */
                 fprintf(stderr, "nemotron: corrupt q8p tensor %s\n", name ? name : "?");
                 nemo_model_free(model);
                 return -1;

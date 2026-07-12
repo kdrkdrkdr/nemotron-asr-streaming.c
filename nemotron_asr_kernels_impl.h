@@ -45,8 +45,6 @@ int nemo_argmax_q8p_range_neon(const int8_t *x_q8, float x_scale,
                                float *best_val_out);
 float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const float *k,
                                     const float *bias_v, const float *p, int n);
-void nemo_matvec_f32_neon(float *y, const float *x, const float *w, const float *b,
-                          int in_dim, int out_dim);
 void nemo_vec_axpy_inplace_neon(float *dst, const float *src, float alpha, int n);
 void nemo_fft512_power_f32_neon(float *power, const float *frame);
 void nemo_preconv_emit_f32_neon(float *out, const float *history, const float *w, const float *b,
@@ -73,8 +71,6 @@ int nemo_argmax_q8p_range_avx(const int8_t *x_q8, float x_scale,
                               float *best_val_out);
 float nemo_attention_score_f32_avx(const float *q, const float *bias_u, const float *k,
                                    const float *bias_v, const float *p, int n);
-void nemo_matvec_f32_avx(float *y, const float *x, const float *w, const float *b,
-                         int in_dim, int out_dim);
 void nemo_vec_axpy_inplace_avx(float *dst, const float *src, float alpha, int n);
 void nemo_fft512_power_f32_avx(float *power, const float *frame);
 void nemo_preconv_emit_f32_avx(float *out, const float *history, const float *w, const float *b,

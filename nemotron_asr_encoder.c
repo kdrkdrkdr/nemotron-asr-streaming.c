@@ -67,6 +67,7 @@ struct nemo_encoder_stream_t {
     int pending_len;
     int pending_cap;
     int chunk;
+    int reset_pending; /* clear attention/conv caches before the next chunk */
 };
 
 static void make_rel_pe_range(float *pe, int min_pos, int max_pos);
@@ -492,6 +493,16 @@ static int apply_prompt(const nemo_ctx_t *ctx, enc_stream_state_t *s, float *x, 
     return 0;
 }
 
+/*
+ * Request a cache reset before the next chunk. Called by the streaming
+ * orchestration when the RNN-T decoder signals a code-switch stall
+ * (nemo_rnnt_stream_take_enc_reset), so the switched-to language re-locks with
+ * no stale left context. Stream-local: never crosses to another stream.
+ */
+void nemo_encoder_stream_request_reset(nemo_encoder_stream_t *s) {
+    if (s) s->reset_pending = 1;
+}
+
 nemo_encoder_stream_t *nemo_encoder_stream_create(nemo_ctx_t *ctx) {
     nemo_encoder_stream_t *s = (nemo_encoder_stream_t *)calloc(1, sizeof(*s));
     if (!s) return NULL;
@@ -563,6 +574,20 @@ int nemo_encoder_stream_accept(nemo_ctx_t *ctx, nemo_encoder_stream_t *s,
             int n = s->pending_len < s->chunk ? s->pending_len : s->chunk;
             float *cur = s->enc.chunk_buf;
             if (!cur || n > s->enc.scratch_t) return -1;
+            /*
+             * The RNN-T decoder stalled on a long blank run (a code switch left
+             * the encoder's attention cache holding the previous language, so
+             * the switched-to speech decodes as blank). Clear the per-layer
+             * attention K/V and conv caches so this chunk re-locks onto the
+             * current audio with no stale left context. See the decoder.
+             */
+            if (s->reset_pending) {
+                for (int li = 0; li < NEMO_ENC_LAYERS; li++) {
+                    s->enc.att_len[li] = 0;
+                    s->enc.conv_len[li] = 0;
+                }
+                s->reset_pending = 0;
+            }
             memcpy(cur, s->pending, (size_t)n * NEMO_D_MODEL * sizeof(float));
             for (int i = 0; i < NEMO_ENC_LAYERS; i++) {
                 if (conformer_layer_stream(ctx, &ctx->model.encoder.layers[i], &s->enc, i, cur, n) != 0) {

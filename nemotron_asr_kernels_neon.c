@@ -12,7 +12,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
 
 #ifdef __aarch64__
 #define NEMO_FMAQ_F32(acc, a, b) vfmaq_f32((acc), (a), (b))
@@ -222,8 +221,8 @@ float nemo_attention_score_f32_neon(const float *q, const float *bias_u, const f
     return sum;
 }
 
-void nemo_matvec_f32_neon(float *y, const float *x, const float *w, const float *b,
-                          int in_dim, int out_dim) {
+static void nemo_matvec_f32_neon(float *y, const float *x, const float *w, const float *b,
+                                 int in_dim, int out_dim) {
     for (int o = 0; o < out_dim; o++) {
         y[o] = dot_f32_neon_inline(x, w + (size_t)o * in_dim, in_dim) + (b ? b[o] : 0.0f);
     }

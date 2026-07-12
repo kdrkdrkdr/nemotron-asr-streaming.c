@@ -204,9 +204,6 @@ static int nemo_weight_q8_stride(const nemo_weight_t *w, int fallback) {
 }
 
 static float nemo_quantize_q8_symmetric_padded(const float *x, int8_t *x_q8,
-                                               int n, int stride);
-
-static float nemo_quantize_q8_symmetric_padded(const float *x, int8_t *x_q8,
                                                int n, int stride) {
     float max_abs = 0.0f;
     for (int i = 0; i < n; i++) {
@@ -312,9 +309,7 @@ static int8_t nemo_q8p_value(const int8_t *w, int row, int stride, int col) {
 }
 
 static float nemo_q8_dot_quantized_row(const int8_t *x_q8, float x_scale,
-                                       const nemo_weight_t *w, int row,
-                                       int stride, int n) {
-    (void)n;
+                                       const nemo_weight_t *w, int row, int stride) {
     int q8_stride = nemo_weight_q8_stride(w, stride);
     int32_t acc = nemo_dot_i8_i8_packed_scalar(x_q8, w->q8, row, q8_stride);
     return (float)acc * x_scale * w->q8_scales[row];
@@ -546,7 +541,7 @@ static void nemo_prompt_q8_worker(int tid, int n_threads, void *arg) {
         for (int o = start; o < end; o++) {
             float v = (t->b ? t->b[o] : 0.0f) +
                       nemo_weight_value_row(t->w, o, stride, t->in_dim + t->prompt_id);
-            v += nemo_q8_dot_quantized_row(x_q8, x_scale, t->w, o, stride, t->in_dim);
+            v += nemo_q8_dot_quantized_row(x_q8, x_scale, t->w, o, stride);
             t->y[(size_t)r * t->out_dim + o] = v > 0.0f ? v : 0.0f;
         }
     }
@@ -575,8 +570,8 @@ static void nemo_lstm_gates_q8_worker(int tid, int n_threads, void *arg) {
         float v = 0.0f;
         if (t->b_ih) v += t->b_ih[o];
         if (t->b_hh) v += t->b_hh[o];
-        v += nemo_q8_dot_quantized_row(x_q8, x_scale, t->w_ih, o, t->dim, t->dim);
-        v += nemo_q8_dot_quantized_row(h_q8, h_scale, t->w_hh, o, t->dim, t->dim);
+        v += nemo_q8_dot_quantized_row(x_q8, x_scale, t->w_ih, o, t->dim);
+        v += nemo_q8_dot_quantized_row(h_q8, h_scale, t->w_hh, o, t->dim);
         t->y[o] = v;
     }
     nemo_q8_tmp_free(x_q8, stack_x_q8);

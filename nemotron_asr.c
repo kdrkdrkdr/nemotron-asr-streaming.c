@@ -85,6 +85,11 @@ static int transcribe_encoder_chunk(void *user, const float *enc, int enc_frames
     transcribe_stream_cb_t *s = (transcribe_stream_cb_t *)user;
     double t0 = nemo_time_ms();
     int rc = nemo_rnnt_stream_accept(s->ctx, s->rnnt, enc, enc_frames);
+    /* If the decoder stalled (code switch), forward its request to clear the
+     * encoder caches before the next chunk. Kept stream-local on purpose. */
+    if (nemo_rnnt_stream_take_enc_reset(s->rnnt)) {
+        nemo_encoder_stream_request_reset(s->enc);
+    }
     s->ctx->perf_decoder_ms += nemo_time_ms() - t0;
     if (rc == 0) s->ctx->perf_frames += enc_frames;
     return rc;

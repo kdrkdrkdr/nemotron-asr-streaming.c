@@ -154,10 +154,12 @@ nemo_encoder_stream_t *nemo_encoder_stream_create(nemo_ctx_t *ctx);
 int nemo_encoder_stream_accept(nemo_ctx_t *ctx, nemo_encoder_stream_t *stream,
                                const float *mel, int mel_frames, int final,
                                nemo_encoder_chunk_cb cb, void *user);
+void nemo_encoder_stream_request_reset(nemo_encoder_stream_t *stream);
 void nemo_encoder_stream_free(nemo_encoder_stream_t *stream);
 nemo_rnnt_stream_t *nemo_rnnt_stream_create(nemo_ctx_t *ctx);
 int nemo_rnnt_stream_accept(nemo_ctx_t *ctx, nemo_rnnt_stream_t *stream,
                             const float *enc, int enc_frames);
+int nemo_rnnt_stream_take_enc_reset(nemo_rnnt_stream_t *stream);
 const char *nemo_rnnt_stream_text(const nemo_rnnt_stream_t *stream);
 size_t nemo_rnnt_stream_text_len(const nemo_rnnt_stream_t *stream);
 char *nemo_rnnt_stream_finish(nemo_rnnt_stream_t *stream);

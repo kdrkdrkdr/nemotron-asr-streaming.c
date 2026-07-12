@@ -192,6 +192,59 @@ frames; encoder chunks are non-overlapping with `att_right + 1` frames and reuse
 cached left context; conformer conv keeps causal GLU history; the RNN-T decoder
 keeps prediction-network hidden and cell state across chunks.
 
+## Code-switch Recovery
+
+The base model is single-language-per-utterance: `auto` detects the language and
+appends a `<xx-YY>` tag after the terminal punctuation. Its streaming decode has
+no per-switch state reset, so a mid-utterance language switch drops the onset of
+the switched-to language. The cause is carried-over streaming state: after the
+switch the RNN-T prediction network (an internal LM) still favors the previous
+language, and the encoder's attention cache still holds its left context, so the
+new onset decodes as a long run of blanks. This is a property of the model, not
+the port — single-utterance and continuous same-language decode match the
+reference exactly (see the comparison below).
+
+The runtime recovers with a small, non-VAD heuristic driven by the model's own
+output. In `nemo_rnnt_stream_accept` a per-stream `blank_run` counts consecutive
+all-blank encoder frames. Once it reaches `NEMO_STALL_RESET_FRAMES` (16 frames =
+~1.28 s, overridable per stream by the `NEMO_STALL_FRAMES` env var; `0` disables)
+and at least one token has been emitted (`emitted_any`, so leading silence never
+clips the first word), the decoder:
+
+- re-primes the prediction network to its start state (zero hidden/cell, a
+  blank `pred_step`, and a fresh `pred_proj`), and
+- raises `enc_reset_req` on its own stream.
+
+The signal is stream-local, never on the shared context. The orchestration reads
+it after each chunk with `nemo_rnnt_stream_take_enc_reset` and forwards it via
+`nemo_encoder_stream_request_reset`, which sets the encoder stream's
+`reset_pending`; the next chunk clears that stream's per-layer attention K/V and
+conv cache lengths before encoding. Because the encoder produces a chunk and then
+decodes it (in lock-step through the callback) before the next chunk, the flag
+set on chunk *k* is consumed before chunk *k+1* encodes. The `%` condition
+re-fires every `NEMO_STALL_FRAMES` through a long stall — a single reset recovers
+the near onset but not a longer, encoder-side stall. Genuine silence is safe: a
+re-primed decoder still emits blanks for it (measured: zero spurious tokens over
+a 5 s silent gap).
+
+Limitation: the `[56, 13]` (1120 ms) context family is not exposed, because its
+14-frame chunk is too coarse — the encoder reset lands on a chunk boundary and an
+onset can still slip. Only `att_right` 0/1/3/6 are offered.
+
+### Verification against the reference
+
+To confirm the drop is the base model's behavior, the original
+`nemotron-3.5-asr-streaming-0.6b.nemo` was run in NeMo (`EncDecRNNTBPEModelWithPrompt`,
+`target_lang="auto"`) on real speech (Google FLEURS clips concatenated into
+cross-language switches), in both full-context offline `transcribe()` and
+cache-aware streaming (`conformer_stream_step` with `CacheAwareStreamingAudioBuffer`,
+`att_context_size = [56, att_right]`). The reference drops the second language on
+Korean→English and Spanish→Japanese in both modes, and additionally loses the
+Korean onset of English→Korean in streaming at `att_right 1`. This runtime with
+recovery off reproduces those drops onset-for-onset (faithful port); with recovery
+on it keeps all of them, with no regression on single-language, continuous, or
+short-alternation audio, across eight language pairs in both directions.
+
 ## Public Kernel Surface
 
 The exposed kernels focus on the W8A8 hot path:
