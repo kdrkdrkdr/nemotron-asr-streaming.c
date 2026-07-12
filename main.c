@@ -86,14 +86,6 @@ int main(int argc, char **argv) {
     }
     if (!model_info &&
         att_right != 0 && att_right != 1 && att_right != 3 && att_right != 6) {
-        /*
-         * The model was also trained with a 14-frame (att_right 13, 1120 ms)
-         * context family, but that chunk is too coarse for the code-switch
-         * recovery reset (which lands on a chunk boundary), so a switched-to
-         * language can still lose its onset there. We only expose the low-latency
-         * families that recover cleanly; att_right 6 already gives 560 ms of
-         * look-ahead for accuracy-first use.
-         */
         fprintf(stderr, "nemotron: --att-right must be one of 0,1,3,6\n");
         nemo_free(ctx);
         return 1;

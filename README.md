@@ -138,9 +138,7 @@ more latency. One encoder frame is 80 ms.
 | `3`  | 320 ms  | 4  | **default — balanced** |
 | `6`  | 560 ms  | 7  | most context |
 
-Only these four values are valid — they are the model's trained context families.
-(The model has a fifth, 1120 ms family, but its 14-frame chunk is too coarse for
-the code-switch reset — which lands on a chunk boundary — so it is not exposed.)
+Only these four values are valid.
 
 ## Options
 

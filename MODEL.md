@@ -227,10 +227,6 @@ the near onset but not a longer, encoder-side stall. Genuine silence is safe: a
 re-primed decoder still emits blanks for it (measured: zero spurious tokens over
 a 5 s silent gap).
 
-Limitation: the `[56, 13]` (1120 ms) context family is not exposed, because its
-14-frame chunk is too coarse — the encoder reset lands on a chunk boundary and an
-onset can still slip. Only `att_right` 0/1/3/6 are offered.
-
 ### Verification against the reference
 
 To confirm the drop is the base model's behavior, the original
