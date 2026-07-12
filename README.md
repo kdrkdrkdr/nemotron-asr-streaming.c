@@ -19,7 +19,7 @@ language switches** ([code-switching](#multilingual--code-switching)).
 ```bash
 make
 # raw s16le mic → live captions
-ffmpeg -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - \
+ffmpeg -hide_banner -loglevel error -nostats -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - \
   | ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
       --stdin -l auto --strip-tags
 ```
@@ -49,10 +49,14 @@ The runtime reads **raw s16le, 16 kHz, mono** from stdin via `--stdin` and print
 text as you speak. Capture the mic with `ffmpeg` and pipe it in:
 
 ```bash
-ffmpeg -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - \
+ffmpeg -hide_banner -loglevel error -nostats -f avfoundation -i ":0" -ac 1 -ar 16000 -f s16le - \
   | ./nemotron_asr -m nemotron-3.5-asr-streaming-0.6b-w8a8-linear.bin \
       --stdin -l auto --strip-tags --att-right 3 -t 4
 ```
+
+`-hide_banner -loglevel error -nostats` keeps ffmpeg's banner and progress line
+out of the terminal so only the transcription shows (real errors still print;
+use `2>/dev/null` instead to silence ffmpeg entirely).
 
 `--att-right` sets the live latency — lower is snappier, higher waits for more
 look-ahead context (`3` = 320 ms, the default). See the
